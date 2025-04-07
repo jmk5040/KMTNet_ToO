@@ -6,14 +6,14 @@ path_data   = os.path.join(path_base, 'data/')
 path_cfg    = os.path.join(path_base, 'config/')
 path_cat    = os.path.join(path_base, 'catalog/')
 
-path_raw    = os.path.join(path_data, 'raw')
+path_raw    = os.path.join(path_data, 'raw/')
 path_scale  = os.path.join(path_data, 'scaled/')
 path_stack  = os.path.join(path_data, 'stack/')
 path_subt   = os.path.join(path_data, 'subt/')
+path_tmpl   = os.path.join(path_data, 'template/')
 
 path_res    = os.path.join(path_base, 'result/')
 path_plot   = os.path.join(path_res, 'plot/')
-path_phot   = os.path.join(path_res, 'phot/')
 path_log    = os.path.join(path_res, 'log/')
 #%% KMTNet ToO Pipeline
 from astropy.io import fits
@@ -21,23 +21,25 @@ from datetime import datetime
 from astropy.table import Table, vstack
 import KMTNet_ToO_functions as pipe
 
-def ToO_pipeline(date):
+def ToO_pipeline(date, field_info='kmtnet_grid.cat'):
+# def ToO_pipeline(date, field_info='ToO_grid.cat'):
     
     # start of the process
     start = time.time()
     print(f'KMTNet ToO Pipeline Starts for {date}.')
+    print(f'Field/Tiling coordinate information referring to {field_info}.')
     
     # process managements
-    ampcompro   = False
-    astrompro   = False
+    ampcompro   = True
+    astrompro   = True
     astromqapro = True
-    zpscalepro  = False
-    bpmaskpro   = False
-    stackingpro = False
-    qa4stackpro = False
-    catalogpro  = False
-    subtpro     = False
-    rbclasspro  = False
+    zpscalepro  = True
+    bpmaskpro   = True
+    stackingpro = True
+    qa4stackpro = True
+    catalogpro  = True
+    subtpro     = True
+    rbclasspro  = True
 
     process_status = {
         'ampcompro': ampcompro, 'astrompro': astrompro, 'astromqapro': astromqapro, 
@@ -48,6 +50,8 @@ def ToO_pipeline(date):
     # Print process status in a compact form
     for process, status in process_status.items():
         print(f"{process}:\t {'ON' if status else 'OFF'}")
+
+    time.sleep(1)
 
     # make output directories
     path_output1= os.path.join(path_raw, f'{date}/') # where a*fits chip images will be located
@@ -62,14 +66,14 @@ def ToO_pipeline(date):
     os.makedirs(path_output3, exist_ok=True)
     os.chmod(path_output3, 0o777)
 
-    path_output4 = os.path.join(path_phot, f'{date}/') # where ToO*zp.cat will be located
+    path_output4 = os.path.join(path_subt, f'{date}/') # where conv.res.ToO*NxN.fits will be located
     os.makedirs(path_output4, exist_ok=True)
     os.chmod(path_output4, 0o777)
-
-    path_output5 = os.path.join(path_subt, f'{date}/') # where conv.res.ToO*NxN.fits will be located
+    
+    path_output5 = os.path.join(path_output4, 'snap/') # where hd*.new|ref|sub.fits will be located
     os.makedirs(path_output5, exist_ok=True)
     os.chmod(path_output5, 0o777)
-    
+
     # log file setting
     log         = Table([['xxxxxxxxpro'], [9999], [0.0]], names=['process', 'frames', 'time'])
     LOGname     = f"{path_log}ToOprocess_{date}_{datetime.fromtimestamp(start).strftime('%Y-%m-%d_%H:%M:%S')}.log"
@@ -91,11 +95,11 @@ def ToO_pipeline(date):
     
     endampcom = time.time()
     time.sleep(0.1)
-    print(f'Amp combine process done. {endampcom-start:.2f}sec')
+    print(f'Amp to chip combine process done.\t {endampcom-start:.2f}sec')
 
     if astrompro:
 
-        pipe.astrom(path_output1, path_cfg, path_cat, radius=0.73, thresh=5)
+        pipe.astrom(path_output1, path_cfg, path_cat, radius=0.73, ithresh=10, gridcat=field_info)
         log2            = copy.deepcopy(log)
         log2['process'] = 'astrompro'
         log2['frames']  = len(Table.read(f'{path_output1}ToOastrom.txt', format ='ascii'))
@@ -109,21 +113,21 @@ def ToO_pipeline(date):
 
     endastrom = time.time()
     time.sleep(0.1)
-    print(f'The 1st astrometry done. {endastrom-start:.2f}sec')
+    print(f'Astrometry process done.\t {endastrom-start:.2f}sec')
 
     if astromqapro:
         
         regex = re.compile(r"(?P<serial>\d{6})\.(?P<chip>kk|mm|tt|nn)\.fits")
         all_files   = sorted(glob.glob(f'{path_output1}*.fits'))
-        afits   = [file for file in all_files if regex.match(os.path.basename(file))]
-        for img in afits:
+        imgs   = [file for file in all_files if regex.match(os.path.basename(file))]
+        for img in imgs:
             # if 'QARESULT' not in fits.open(img)[0].header:
-            pipe.qatest(img, configdir=path_cfg, refcatdir=path_cat, refcatname='gaiaxp', gridcat='kmtnet_grid.fits')
-            os.system(f'chmod 777 {path_output1}*crmap.fits')
+            pipe.qatest(img, configdir=path_cfg, refcatdir=path_cat, refcatname='gaiaxp', gridcat=field_info, crreject=True, bleedreject=True, weightmap=True, imtype='chip')
+            os.system(f'chmod 777 {path_output1}*mask.fits')
         
         log3            = copy.deepcopy(log)
         log3['process'] = 'astromqapro'
-        log3['frames']  = len(afits)
+        log3['frames']  = len(imgs)
         log3['time']    = round(time.time()-start, 2)
         
         try:
@@ -134,26 +138,21 @@ def ToO_pipeline(date):
 
     endastrom2 = time.time()
     time.sleep(0.1)
-    print(f'Astrometry QA done. {endastrom2-start:.2f}sec')
+    print(f'1st Astrometry QA process done.\t {endastrom2-start:.2f}sec')
 
     if zpscalepro:
-        """
-        reference catalog should be located:
-        {path_cat}smss/
-        {path_cat}apass/
-        """
-        regex = re.compile(r"a(?P<serial>\d{6})\.(?P<chip>kk|mm|tt|nn)\.fits")
+
+        regex = re.compile(r"(?P<serial>\d{6})\.(?P<chip>kk|mm|tt|nn)\.fits")
         all_files   = sorted(glob.glob(f'{path_output1}*.fits')) # ToOampcom.cat should be located
-        afits   = [file for file in all_files if regex.match(os.path.basename(file))]
+        imgs   = [file for file in all_files if regex.match(os.path.basename(file))]
         
-        for img in afits:
-            # outname = pipe.zpscale(img, path_output2, path_cfg, path_cat, path_plot, zpscaled=30.0, figure=False, start=start, gridcat='/data4/kmtntoo/config/astrometry/ToO_grid.cat')
-            outname = pipe.zpscale(img, path_output2, path_cfg, path_cat, path_plot, zpscaled=30.0, figure=False, start=start, gridcat='/data8/KS4/config/kmtnet_grid.cat')
-            if outname != None and os.path.exists(img.replace('.fits', '.crmap.fits')):
-                os.rename(img.replace('.fits', '.crmap.fits'), os.path.join(path_output2, outname.replace('.scaled', '.crmap')))
+        for img in imgs:
+            outname = pipe.zpscale(img, path_output2, path_cfg, path_cat, path_plot, zpscaled=30.0, figure=False, start=start, gridcat=field_info)
+            if outname != None and os.path.exists(img.replace('.fits', '.mask.fits')):
+                os.rename(img.replace('.fits', '.mask.fits'), os.path.join(path_output2, outname.replace('.scaled.', '.mask.')))
         log4            = copy.deepcopy(log)
         log4['process'] = 'zpscalepro'
-        log4['frames']  = len(afits)
+        log4['frames']  = len(imgs)
         log4['time']    = round(time.time()-start, 2)
         
         try:
@@ -164,20 +163,20 @@ def ToO_pipeline(date):
 
     endzpscale     = time.time()
     time.sleep(0.1)
-    print(f'ZP scaling process done. {endzpscale-start:.2f}')
+    print(f'Photometric ZP scaling process done.\t {endzpscale-start:.2f}sec')
 
     if bpmaskpro:
 
         regex = re.compile(r"(?P<field>.*?_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<band>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<serial>\d{6})\.(?P<chip>\w+)\.(?P<type>scaled)\.fits")
         all_files = sorted(glob.glob(f'{path_output2}*.fits'))
-        afits   = [file for file in all_files if regex.match(os.path.basename(file))]
+        imgs   = [file for file in all_files if regex.match(os.path.basename(file))]
 
-        for img in afits:
+        for img in imgs:
             pipe.BPM_update(img, path_cfg)
         
         logm            = copy.deepcopy(log)
         logm['process'] = 'bpmaskpro'
-        logm['frames']  = len(afits)
+        logm['frames']  = len(imgs)
         logm['time']    = round(time.time()-start, 2)
         
         try:
@@ -188,12 +187,12 @@ def ToO_pipeline(date):
 
     endbpmask    = time.time()
     time.sleep(0.1)
-    print(f'BP mask process done. {endbpmask-start:.2f}')       
+    print(f'Badpixel masking process done.\t {endbpmask-start:.2f}sec')       
 
     if stackingpro:
 
         pattern = r"(?P<field>.*?_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<band>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<serial>\d{6})\.(?P<chip>\w+)\.(?P<type>scaled|mask)\.fits"
-        total   = pipe.stacking(pattern, path_output2, path_output3, path_cfg, path_ks4, start=start, gridcat='/data8/KS4/config/kmtnet_grid.cat')
+        total   = pipe.stacking(pattern, path_output2, path_output3, path_cfg, path_tmpl, combinetype='MEDIAN', start=start, gridcat=field_info)
         log5            = copy.deepcopy(log)
         log5['process'] = 'stackingpro'
         log5['frames']  = total
@@ -207,17 +206,16 @@ def ToO_pipeline(date):
 
     endstack    = time.time()
     time.sleep(0.1)
-    print(f'Image stacking process done. {endstack-start:.2f}')       
+    print(f'Image stacking process done.\t {endstack-start:.2f}sec')       
 
     if qa4stackpro:
         
-        regex = re.compile(r"(?P<field>.*?_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<filter>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<exptime>\d+sec)\.(?P<type>scaled)\.stack\.fits")
+        regex = re.compile(r"(?P<field>.*?_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<filter>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<exptime>\d+sec)\.(?P<type>stack|mstack)\.fits")
         all_files   = sorted(glob.glob(f'{path_output3}*.fits'))
-        stackimgs   = [file for file in all_files if regex.match(os.path.basename(file))]
-
+        stackimgs = [file for file in all_files if regex.match(os.path.basename(file)) and regex.match(os.path.basename(file)).group('type') == 'stack']
         for simg in stackimgs:
             # if 'ALNRMS' not in fits.open(simg)[0].header:
-            astrom_qa(simg)
+            pipe.qatest(simg, configdir=path_cfg, refcatdir=path_cat, refcatname='gaiaxp', gridcat=field_info, crreject=False, bleedreject=False, weightmap=True, imtype='stack')
                 # os.system('rm default*')
                 # os.system('rm kmtn*')
 
@@ -234,15 +232,15 @@ def ToO_pipeline(date):
             
     endqa = time.time()
     time.sleep(0.1)
-    print(f'QA for stacked images process done. {endqa-start:.2f}sec')
+    print(f'2nd Astrometry QA process done.\t {endqa-start:.2f}sec')
 
     if catalogpro:
 
-        regex = re.compile(r"(?P<field>.*?_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<filter>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<exptime>\d+sec)\.(?P<type>scaled)\.stack\.fits\.cat")
+        regex = re.compile(r"(?P<field>.*?_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<filter>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<exptime>\d+sec)\.(?P<type>stack)\.fits\.cat")
         all_cats= sorted(glob.glob(f'{path_output3}*.cat'))
         cats    = [file for file in all_cats if regex.match(os.path.basename(file))]
         for cat in cats:
-            pipe.catalogmaker(cat, path_output=path_output4, path_cat=path_cat, figure=False, start=start, path_plot=path_plot)
+            pipe.catalogmaker(cat, path_output=path_output3, path_cat=path_cat, figure=False, start=start, path_plot=path_plot)
 
         log7            = copy.deepcopy(log)
         log7['process'] = 'catalogpro'
@@ -257,20 +255,20 @@ def ToO_pipeline(date):
             
     endcatalog = time.time()
     time.sleep(0.1)
-    print(f"Catalog making process done. {endcatalog-start:.2f} sec")
+    print(f"Catalog making process done.\t {endcatalog-start:.2f}sec")
 
     if subtpro:
 
         # subtraction with hotpants
-        regex = re.compile(r"(?P<field>.*?_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<filter>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<exptime>\d+sec)\.(?P<type>scaled)\.stack\.fits")
+        regex = re.compile(r"(?P<field>.*?_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<filter>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<exptime>\d+sec)\.stack\.fits")
         all_files   = sorted(glob.glob(f'{path_output3}*.fits'))
         stackimgs   = [file for file in all_files if regex.match(os.path.basename(file))]
         for simg in stackimgs:
-            gpsubt.subtraction(simg, path_ref=path_ks4, path_cat=path_output4, path_refcat=path_ks4edr, path_output=path_output5, path_config=path_cfg, detect=3)
+            pipe.subtraction(simg, path_ref=path_tmpl, path_cat=path_output3, path_refcat=path_tmpl, path_output=path_output4, path_config=path_cfg, detect=1.5)
         
         log8            = copy.deepcopy(log)
         log8['process'] = 'subtpro'
-        log8['frames']  = len(sorted(glob.glob(f"{path_output5}*.new.*")))
+        log8['frames']  = len(sorted(glob.glob(f"{path_output4}*.new.*")))
         log8['time']    = round(time.time()-start, 2)
         
         try:
@@ -281,11 +279,11 @@ def ToO_pipeline(date):
         
     endsubt     = time.time()
     time.sleep(0.1)
-    print(f'Image subtraction process done. {endsubt-start:.2f}')
+    print(f'Image subtraction process done.\t {endsubt-start:.2f}sec')
     
     if rbclasspro:
         # ML R/B classifications for the snapshot images
-        command = ['python', 'Cowork-GW_universe-issue-3/inference.py', '--dir_fits', path_output5, '--dir_ckpt', 'Cowork-GW_universe-issue-3/ckpt']
+        command = ['python', 'rbclass_kmtnet/inference.py', '--dir_fits', path_output5, '--dir_ckpt', 'rbclass_kmtnet/ckpt', '--ckpt_name', 'model:OTrain_imsize:51_channels:rns_normalize:minmax_name:ri+ngi+gd_seed:0.bin']
         result = subprocess.run(command, capture_output=True, text=True)
 
         # Check result
@@ -309,7 +307,7 @@ def ToO_pipeline(date):
 
     endrb   = time.time()
     time.sleep(0.1)
-    print(f'Real/Bogus classification process done. {endrb-start:.2f}')
+    print(f'Real/Bogus classification process done.\t {endrb-start:.2f}sec')
 
     # end of process (LOG saving)
     try:
@@ -320,7 +318,7 @@ def ToO_pipeline(date):
     
     return
 
-#%% KMTNet ToO WatchDog
+#%% KMTNet ToO Pipeline
 import shutil
 import argparse
 import multiprocessing
@@ -491,7 +489,7 @@ if __name__ == "__main__":
     
     watch_directory     = path_raw
     ncores              = 1
-    data_dirs   = [d for d in os.listdir(watch_directory) if os.path.isdir(os.path.join(watch_directory, d))]
+    data_dirs   = sorted([d for d in os.listdir(watch_directory) if os.path.isdir(os.path.join(watch_directory, d))])
 
     print(f"List of Data Directories in {watch_directory}:")
     print("="*20)

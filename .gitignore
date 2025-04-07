@@ -1,0 +1,11 @@
+# .gitignore
+
+data/
+legacy/
+rbclass_kmtnet/
+*.fits
+*.log
+*.cat
+*.png
+*.jpg
+*.npy
