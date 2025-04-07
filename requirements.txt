@@ -1,0 +1,5 @@
+stropy
+astroquery
+matplotlib
+scipy
+scikit-learn  # if your real/bogus model uses it
