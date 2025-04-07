@@ -34,6 +34,11 @@ ISOAREA_IMAGE            #Isophotal area above Analysis threshold               
 ISOAREAF_IMAGE           #Isophotal area (filtered) above Detection threshold       [pixel**2]
 IMAFLAGS_ISO             #FLAG-image flags OR'ed over the iso. profile             
 NIMAFLAGS_ISO            #Number of flagged pixels entering IMAFLAGS_ISO 
+MAG_PSF                  #Magnitude from PSF-fitting                                [mag]
+MAGERR_PSF               #RMS magnitude error from PSF-fitting                      [mag]
+CHI2_PSF                 #Reduced chi2 from PSF-fitting
+SPREAD_MODEL             #Spread parameter from model-fitting                      
+SPREADERR_MODEL          #Spread parameter error from model-fitting 
 
 #NUMBER                   Running object number                                    
 #EXT_NUMBER               FITS extension number                                    

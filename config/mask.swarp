@@ -2,8 +2,8 @@
 # EB 2014-03-19
 #
 #----------------------------------- Output -----------------------------------
-IMAGEOUT_NAME          stack.fits       # Output filename
-WEIGHTOUT_NAME       stack.weight.fits  # Output weight-map filename
+IMAGEOUT_NAME          coadd.fits      # Output filename
+WEIGHTOUT_NAME       coadd.weight.fits # Output weight-map filename
  
 HEADER_ONLY            N               # Only a header as an output file (Y/N)?
 HEADER_SUFFIX          .head           # Filename extension for additional headers
@@ -16,12 +16,12 @@ RESCALE_WEIGHTS        Y               # Rescale input weights/variances (Y/N)?
 WEIGHT_SUFFIX          .weight.fits    # Suffix to use for weight-maps
 WEIGHT_IMAGE                           # Weightmap filename if suffix not used
                                        # (all or for each weight-map)
-WEIGHT_THRESH                          # Bad pixel weight-threshold
+WEIGHT_THRESH                         # Bad pixel weight-threshold
  
 #------------------------------- Co-addition ----------------------------------
  
 COMBINE                Y               # Combine resampled images (Y/N)?
-COMBINE_TYPE           AVERAGE         # MEDIAN,AVERAGE,MIN,MAX,WEIGHTED,CLIPPED
+COMBINE_TYPE           SUM             # MEDIAN,AVERAGE,MIN,MAX,WEIGHTED,CLIPPED
                                        # CHI-OLD,CHI-MODE,CHI-MEAN,SUM,
                                        # WEIGHTED_WEIGHT,MEDIAN_WEIGHT,
                                        # AND,NAND,OR or NOR
@@ -33,14 +33,14 @@ CLIP_WRITELOG          N               # Write output file with coordinates of
                                        # clipped pixels (Y/N) 
 CLIP_LOGNAME           clipped.log     # Name of output file with coordinates
                                        # of clipped pixels
-BLANK_BADPIXELS        N               # Set to 0 pixels having a weight of 0
+BLANK_BADPIXELS        Y               # Set to 0 pixels having a weight of 0
  
 #-------------------------------- Astrometry ----------------------------------
  
 CELESTIAL_TYPE         EQUATORIAL      # NATIVE, PIXEL, EQUATORIAL,
                                        # GALACTIC,ECLIPTIC, or SUPERGALACTIC
 PROJECTION_TYPE        TAN             # Any WCS projection code or NONE
-PROJECTION_ERR         0.001           # Maximum projection error (in output
+PROJECTION_ERR         0               # Maximum projection error (in output
                                        # pixels), or 0 for no approximation
 CENTER_TYPE            MANUAL          # MANUAL, ALL or MOST
 CENTER         00:00:00.0, +00:00:00.0 # Coordinates of the image center
@@ -62,19 +62,19 @@ INTERPOLATE            N               # Interpolate bad input pixels (Y/N)?
                                        # (all or for each image)
  
 FSCALASTRO_TYPE        VARIABLE        # NONE,FIXED, or VARIABLE
-FSCALE_KEYWORD         NONE            # FITS keyword for the multiplicative
+FSCALE_KEYWORD         FLXSCALE        # FITS keyword for the multiplicative
                                        # factor applied to each input image
 FSCALE_DEFAULT         1.0             # Default FSCALE value if not in header
  
 GAIN_KEYWORD           GAIN            # FITS keyword for effect. gain (e-/ADU)
-GAIN_DEFAULT           1.0             # Default gain if no FITS keyword found
+GAIN_DEFAULT           0.0             # Default gain if no FITS keyword found
                                        # 0 = infinity (all or for each image)
 SATLEV_KEYWORD         SATURATE        # FITS keyword for saturation level (ADU)
-SATLEV_DEFAULT         150000.0        # Default saturation if no FITS keyword
+SATLEV_DEFAULT         100.0           # Default saturation if no FITS keyword
  
 #--------------------------- Background subtraction ---------------------------
  
-SUBTRACT_BACK          Y               # Subtraction sky background (Y/N)?
+SUBTRACT_BACK          N               # Subtraction sky background (Y/N)?
                                        # (all or for each image)
  
 BACK_TYPE              AUTO            # AUTO or MANUAL
@@ -107,7 +107,7 @@ WRITE_XML              N               # Write XML file (Y/N)?
 XML_NAME               swarp.xml       # Filename for XML output
 XSL_URL                file:///usr/share/swarp/swarp.xsl
                                        # Filename for XSL style-sheet
-VERBOSE_TYPE           NORMAL          # QUIET,LOG,NORMAL, or FULL
+VERBOSE_TYPE           QUIET           # QUIET,LOG,NORMAL, or FULL
 NNODES                 1               # Number of nodes (for clusters)
 NODE_INDEX             0               # Node index (for clusters)
  
@@ -115,4 +115,3 @@ NTHREADS               8               # Number of simultaneous threads for
                                        # the SMP version of SWarp
                                        # 0 = automatic
 NOPENFILES_MAX         512             # Maximum number of files opened by SWarp
-
