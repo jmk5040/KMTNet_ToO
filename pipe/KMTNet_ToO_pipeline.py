@@ -1,6 +1,6 @@
 #%% path defines
 import time, os, sys, glob, re, copy, shutil, subprocess
-path_base   = '/data8/kmtntoo/'
+path_base   = './'
 
 path_data   = os.path.join(path_base, 'data/')
 path_cfg    = os.path.join(path_base, 'config/')
@@ -15,6 +15,19 @@ path_tmpl   = os.path.join(path_data, 'tmpl/')
 path_res    = os.path.join(path_base, 'result/')
 path_plot   = os.path.join(path_res, 'plot/')
 path_log    = os.path.join(path_res, 'log/')
+
+# Create necessary directories
+os.makedirs(path_data, exist_ok=True)
+os.makedirs(path_cfg, exist_ok=True)
+os.makedirs(path_cat, exist_ok=True)
+os.makedirs(path_raw, exist_ok=True)
+os.makedirs(path_scale, exist_ok=True)
+os.makedirs(path_stack, exist_ok=True)
+os.makedirs(path_subt, exist_ok=True)
+os.makedirs(path_tmpl, exist_ok=True)
+os.makedirs(path_res, exist_ok=True)
+os.makedirs(path_plot, exist_ok=True)
+os.makedirs(path_log, exist_ok=True)
 
 #%% KMTNet ToO Pipeline
 from astropy.io import fits
