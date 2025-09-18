@@ -10,7 +10,7 @@ path_raw    = os.path.join(path_data, 'raw/')
 path_scale  = os.path.join(path_data, 'scaled/')
 path_stack  = os.path.join(path_data, 'stack/')
 path_subt   = os.path.join(path_data, 'subt/')
-path_tmpl   = '/data8/KS4/database/stack/'
+path_tmpl   = os.path.join(path_data, 'tmpl/')
 
 path_res    = os.path.join(path_base, 'result/')
 path_plot   = os.path.join(path_res, 'plot/')
