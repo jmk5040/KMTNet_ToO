@@ -23,6 +23,73 @@ from KMTNet_util_functions import (
 )
 #%% ToOAmplifierCombine.py
 def ampcom(path_data, path_cfg):
+    """
+    Amplifier combination and quality control for KMTNet images.
+    
+    This function processes KMTNet multi-extension FITS files by combining 32 amplifier
+    extensions into 4 individual chip images (kk, mm, tt, nn). It performs quality
+    control checks and isolates poor-quality images into separate directories.
+    
+    Parameters
+    ----------
+    path_data : str
+        Path to the directory containing raw KMTNet FITS files. Files should follow
+        the naming convention 'kmt*.fits'. The function will create subdirectories
+        for quality control: 'badccderror/', 'badseeing/', and 'badtracking/'.
+    path_cfg : str
+        Path to the configuration directory containing SExtractor configuration files:
+        - kmtnet.param: SExtractor parameters file
+        - kmtnet.sex: SExtractor configuration file
+        - kmtnet.conv: SExtractor convolution file
+        - kmtnet.nnw: SExtractor neural network weights file
+    
+    Returns
+    -------
+    int
+        Returns 0 upon successful completion.
+    
+    Notes
+    -----
+    The function performs the following operations:
+    
+    1. **Amplifier Combination**: 
+       - Combines 8 amplifiers per chip into 4 chips (kk, mm, tt, nn)
+       - Adds WCS information to each chip header
+       - Handles both 32-extension and 4-extension input files
+    
+    2. **Quality Control Checks**:
+       - **Bad CCD Error**: Images with sky values ≤ 50 or missing coordinates
+       - **Bad Seeing**: Images with FWHM ≥ 6 arcseconds
+       - **Bad Tracking**: Images with mean elongation ≥ 2.0
+       - Good quality images are processed and sky-subtracted
+    
+    3. **Output Files**:
+       - Creates individual chip files: `{serial}.{chip}.fits`
+       - Generates quality log: `ToOampcom.cat`
+       - Moves poor-quality images to appropriate subdirectories
+    
+    4. **Sky Subtraction**:
+       - Calculates median sky value for each amplifier
+       - Performs differential sky subtraction across amplifiers
+       - Updates FITS headers with sky values and quality metrics
+    
+    Examples
+    --------
+    >>> ampcom('/path/to/raw/data/', '/path/to/config/')
+    Total number of raw images = 10
+    Amp combining process for frame:240101 (1/10)
+    Amp combining process for frame:240102 (2/10)
+    ...
+    
+    The function will create:
+    - 240101.kk.fits, 240101.mm.fits, 240101.tt.fits, 240101.nn.fits
+    - ToOampcom.cat (quality log)
+    - badccderror/, badseeing/, badtracking/ (quality control directories)
+    
+    See Also
+    --------
+    KMTNet_ToO_pipeline : Main pipeline that calls this function
+    """
     
     import os
     import numpy as np
@@ -233,13 +300,86 @@ def ampcom(path_data, path_cfg):
 #%% ToOAstrometry.py
 def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet_grid.fits'):
     """
-    date = '250831_SAAO'
-    path_data = f'/data8/kmtntoo/data/raw/{date}/'
-    path_cfg = '/data8/kmtntoo/config/'
-    path_cat = '/data8/kmtntoo/catalog/'
-    radius = 1.0
-    ithresh = 10
-    gridcat='kmtnet_grid.fits'
+    Astrometric calibration of KMTNet chip images using SCAMP.
+    
+    This function performs astrometric calibration on KMTNet chip images (kk, mm, tt, nn)
+    by running SExtractor to detect sources and SCAMP to solve for World Coordinate System
+    (WCS) parameters. It uses reference catalogs (GAIA or UCAC-4) for calibration.
+    
+    Parameters
+    ----------
+    path_data : str
+        Path to the directory containing KMTNet chip images. Files should follow
+        the naming convention '{serial}.{chip}.fits' where chip is one of [kk, mm, tt, nn].
+    path_cfg : str
+        Path to the configuration directory containing:
+        - kmtnet.param: SExtractor parameters file
+        - kmtnet.sex: SExtractor configuration file
+        - kmtnet.conv: SExtractor convolution file
+        - kmtnet.nnw: SExtractor neural network weights file
+        - kmtnet.scamp: SCAMP configuration file
+        - ahead/: Directory containing aheader files for each observatory
+    path_cat : str
+        Path to the catalog directory containing reference catalogs:
+        - gaiaxp/: GAIA reference catalogs
+        - kmtnet_grid.fits: KMTNet field grid catalog
+    radius : float, optional
+        Search radius in degrees for reference catalog matching. Default is 1.0.
+    ithresh : int, optional
+        Initial detection threshold for SExtractor. Default is 5.
+    gridcat : str, optional
+        Name of the KMTNet grid catalog file. Default is 'kmtnet_grid.fits'.
+    
+    Returns
+    -------
+    int
+        Returns 0 upon successful completion.
+    
+    Notes
+    -----
+    The function performs the following operations:
+    
+    1. **Source Detection**:
+       - Runs SExtractor on each chip image to detect sources
+       - Creates source catalogs with positions and photometry
+       - Uses adaptive thresholding for optimal source detection
+    
+    2. **Astrometric Solution**:
+       - Matches detected sources with reference catalog (GAIA or UCAC-4)
+       - Uses SCAMP to solve for WCS parameters (plate scale, rotation, distortion)
+       - Applies TPV (Tangent Plane) projection for accurate coordinate transformation
+    
+    3. **Quality Control**:
+       - Iteratively adjusts detection threshold if RMS errors are too high
+       - Maximum 3 iterations with increasing threshold
+       - Rejects solutions with RMS > 1e-4 arcseconds
+    
+    4. **Header Updates**:
+       - Updates FITS headers with astrometric solution
+       - Adds WCS keywords (CRVAL1, CRVAL2, CD matrix)
+       - Preserves original observation metadata
+    
+    5. **Observatory-Specific Processing**:
+       - SSO (Australia): Uses kmtnet_global_sso.ahead files
+       - SAAO (South Africa): Uses kmtnet_global.ahead files  
+       - CTIO (Chile): Uses kmtnet_global_ctio.ahead files
+    
+    Examples
+    --------
+    >>> astrom('/path/to/chip/images/', '/path/to/config/', '/path/to/catalogs/')
+    Astrometry process for frame:240101, thresh:5 (1/10)
+    Astrometry process for frame:240102, thresh:5 (2/10)
+    ...
+    
+    The function will create:
+    - {serial}.{chip}.astrom.cat (SExtractor source catalogs)
+    - {serial}.{chip}.astrom.head (SCAMP astrometric headers)
+    - Updated FITS files with WCS information
+    
+    See Also
+    --------
+    ampcom : Amplifier combination function that creates input chip images
+    KMTNet_ToO_pipeline : Main pipeline that calls this function
     """
 
     import os
@@ -430,51 +570,129 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
     
     return 0
 #%% ToOAstrometryQA.py
-def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, crreject=True, bleedreject=True, weightmap=True, imtype='chip') :
+def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, crreject=True, bleedreject=True, weightmap=True, imtype='chip'):
     """
-    QATEST ver 1.4.0
-
-    # Input Format : 
-    os.chdir(f'/data8/kmtntoo/pipe/')
+    Quality Assurance (QA) test for astrometric calibration of KMTNet images.
     
-    fname       = '/data8/kmtntoo/data/raw/20250212_CTIO/062889.nn.fits'
-    configdir   = '/data8/kmtntoo/config/'
-    gridcat     = 'kmtnet_grid.fits'
-    refcatdir   = '/data8/kmtntoo/catalog/'
-    refcatname  = 'gaiaxp'
-    divnum      = 8
-    crreject    = True
-    bleedreject = True
-    weightmap   = True
-    imtype      = 'chip'
-
-    fname       = '/data8/kmtntoo/data/stack/250831_SAAO/TOO_0578_0578.316-78.I.20250831.SAAO.480sec.stack.fits'
-    configdir   = '/data8/kmtntoo/config/'
-    gridcat     = 'kmtnet_grid.fits'
-    refcatdir   = '/data8/kmtntoo/catalog/'
-    refcatname  = 'gaiaxp'
-    divnum      = 8
-    crreject    = False
-    bleedreject = False
-    weightmap   = True
-    imtype      = 'stack'
-
-    Caution: cr rejection should be carried out before background subtraction.
-    # Ouput Format : 
-    ## Updates FITS header with new QA (Quality Assurance) info :
-    HISTORY   Quality Assurance (QA) by QATEST version 1.3.0 (2022-04-29)
-    COMMENT   2022 JSH
-    CCDNAME =                 / Name of CCD
-    REASTROM=                 / True if reastrometry done
-    QAREFCAT=                 / Reference Catalog used for QA
-    QAALNNUM=                 / Number of objects for QA [integer]
-    QAALNRMS=                 / RMS of misalignment with QAREFCAT [arcsec]
-    QAALNSTD=                 / Uncertainty of misalignment [arcsec]
-    QANSECT =                 / Total num of divided sections for QA [integer]
-    QAGDSECT=                 / Number of sections classified as good [integer]
-    QABDSECT=                 / Positions of sections classified as bad
-    QABADAMP=                 / True if bad AMP exists
-    QARESULT=                 / True if QA is good 
+    This function performs comprehensive quality assurance testing on individual KMTNet
+    images (chip or stacked) by evaluating astrometric accuracy, detecting artifacts,
+    and assessing overall image quality. It generates bad-pixel masks, matches sources
+    with reference catalogs, and updates FITS headers with QA metrics.
+    
+    Parameters
+    ----------
+    fname : str
+        Path to the input FITS image file. Can be either a chip image (e.g., 
+        '062889.nn.fits') or a stacked image (e.g., 'TOO_0578.stack.fits').
+    configdir : str
+        Path to the configuration directory containing:
+        - kmtnet.sex: SExtractor configuration file
+        - kmtnet.param: SExtractor parameters file
+        - kmtnet_imask.param: SExtractor parameters for mask analysis
+        - kmtnet.conv: SExtractor convolution file
+        - kmtnet.nnw: SExtractor neural network weights file
+        - kmtnet_grid.fits: KMTNet field grid catalog
+        - badastrom.txt: Log file for bad astrometric solutions
+    gridcat : str
+        Name of the KMTNet grid catalog file (e.g., 'kmtnet_grid.fits').
+    refcatdir : str
+        Path to the reference catalog directory containing:
+        - gaiaxp/: GAIA reference catalogs
+        - gaiaedr3/: GAIA EDR3 reference catalogs
+    refcatname : str, optional
+        Name of the reference catalog to use ('GAIAXP', 'gaiaedr3'). 
+        Default is 'GAIAXP'.
+    divnum : int, optional
+        Number of divisions for image segmentation analysis (divnum x divnum grid).
+        Default is 8 (creates 8x8 = 64 sections).
+    crreject : bool, optional
+        Whether to perform cosmic ray rejection and create bad-pixel masks.
+        Default is True.
+    bleedreject : bool, optional
+        Whether to detect and mask pixel bleeding artifacts.
+        Default is True.
+    weightmap : bool, optional
+        Whether to create and use weight maps for photometry.
+        Default is True.
+    imtype : str, optional
+        Type of input image: 'chip' for individual chip images or 'stack' for 
+        stacked images. Default is 'chip'.
+    
+    Returns
+    -------
+    None
+        Results are written to FITS headers and log files.
+    
+    Notes
+    -----
+    The function performs the following operations:
+    
+    1. **Bad-Pixel Mask Generation** (for chip images):
+       - **Cosmic Ray Detection**: Uses astroscrappy to identify cosmic rays
+       - **Cross-talk Masking**: Detects amplifier cross-talk artifacts
+       - **Pixel Bleeding**: Identifies and masks bleeding patterns from saturated pixels
+       - **Weight Map Creation**: Generates weight maps for photometric analysis
+    
+    2. **Source Detection and Analysis**:
+       - Runs SExtractor to detect sources in the image
+       - Applies bad-pixel masks to exclude contaminated regions
+       - Performs quality checks (minimum source count, tracking issues)
+    
+    3. **Reference Catalog Matching**:
+       - Loads appropriate reference catalog (GAIA or GAIA EDR3)
+       - Matches detected sources with reference catalog positions
+       - Calculates astrometric offsets and misalignments
+    
+    4. **Quality Assessment**:
+       - **Sectional Analysis**: Divides image into grid sections for detailed QA
+       - **Good/Bad Classification**: Each section classified as 'good', 'bad', or 'empty'
+       - **Overall QA Result**: Determines if image passes quality standards
+    
+    5. **Header Updates**:
+       - Adds comprehensive QA information to FITS headers
+       - Logs bad astrometric solutions to badastrom.txt
+       - Includes version information and processing details
+    
+    Quality Criteria
+    ----------------
+    - **Good Section**: Detection ratio > 0.6 and RMS alignment < 0.5 arcsec
+    - **Bad Section**: Detection ratio ≤ 0.6 or RMS alignment ≥ 0.5 arcsec
+    - **Overall QA Pass**: ≤ 2 bad sections, ≤ 10 empty sections, median offset < 0.4 arcsec
+    
+    Header Keywords Added
+    ---------------------
+    - QAREFCAT: Reference catalog used for QA
+    - QAALNNUM: Number of objects used for QA
+    - QAALNRMS: RMS of misalignment with reference catalog [arcsec]
+    - QAALNSTD: Uncertainty of misalignment [arcsec]
+    - QANSECT: Total number of sections analyzed
+    - QAGDSECT: Number of good sections
+    - QABDSECT: Encoded positions of bad sections
+    - QABADAMP: True if bad amplifier detected
+    - QARESULT: True if QA passes overall quality standards
+    
+    Examples
+    --------
+    >>> # QA test for a chip image
+    >>> qatest('/path/to/062889.nn.fits', '/path/to/config/', 'kmtnet_grid.fits', 
+    ...        '/path/to/catalogs/', 'GAIAXP', divnum=8, crreject=True, 
+    ...        bleedreject=True, weightmap=True, imtype='chip')
+    
+    >>> # QA test for a stacked image
+    >>> qatest('/path/to/TOO_0578.stack.fits', '/path/to/config/', 'kmtnet_grid.fits',
+    ...        '/path/to/catalogs/', 'GAIAXP', divnum=8, crreject=False,
+    ...        bleedreject=False, weightmap=True, imtype='stack')
+    
+    See Also
+    --------
+    astrom : Astrometric calibration function
+    ampcom : Amplifier combination function
+    KMTNet_ToO_pipeline : Main pipeline that calls this function
+    
+    Warning
+    -------
+    Cosmic ray rejection should be performed before background subtraction
+    for optimal results.
     """
 
     __version__ = '1.4.0' 
@@ -1310,38 +1528,141 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
     Msg.end()
 #%% ToOZeroPointScaler.py
 def zpscale(img, path_output, path_cfg, path_cat, path_plot, mode='1DLINEAR', magkey='AUTO', zpscaled=30.0, pixscale=0.4, gain=1, figure=False, start=None, gridcat='kmtnet_grid.cat'):
+    """
+    Zero-point calibration and homogenization for KMTNet chip images.
     
-    """_summary_
-    Description
-        The zeropoint is scaled to ensure uniform photometric quality of KMTNet images. 
-        The discrete levels of photometric zeropoints of each amplifier are corrected.
-        If there is recurring electronic pattern noise (e.g. SAAO), it will be also removed.
-        Methods
-        (1) 1DLinear: Each amp's Y-axis zp tendency compensation by linear fitting 
-        (2) 2DPolynomial: Each amp's X,Y plane zp tendency compensation by polynomial fitting
-        The scaling process is basically done amp by amp. This is because the zp is discrete for each amp at least slightly.
-    Args:
-        date        = '220328_DWF'
-        img         = f'/data8/kmtntoo/data/raw/{date}/057488.kk.fits'
-        path_output = f'/data8/kmtntoo/data/scaled/{date}/'
-        path_cfg    = '/data8/kmtntoo/config/'
-        path_cat    = '/data8/kmtntoo/catalog/'
-        path_plot   = '/data8/kmtntoo/result/plot/'
-        mode        = '1DLINEAR'
-        # mode        = '2DPOLYNOMIAL'
-        magkey      = 'AUTO'
-        zpscaled    = 30.0
-        pixscale    = 0.4
-        gain        = 1.0
-        figure      = False
-        start       = None
-        gridcat     = 'kmtnet_grid.cat'
-    Returns:
-        _type_: _description_
-        
-    What should be prepared in advance:
-        ToOampcop.cat in the working directory including FWHM data
-        SMSS or APASS reference catalog in pathcat/{survey}
+    This function performs photometric calibration and homogenization of KMTNet chip images
+    by estimating zero-points for each of the eight amplifier regions and correcting
+    geometric tendencies to achieve uniform photometric quality across the entire image.
+    
+    Parameters
+    ----------
+    img : str
+        Path to the input KMTNet chip image FITS file (e.g., '057488.kk.fits').
+    path_output : str
+        Path to the output directory where scaled images will be saved.
+    path_cfg : str
+        Path to the configuration directory containing:
+        - kmtnet.sex: SExtractor configuration file
+        - kmtnet_imask.param: SExtractor parameters file
+        - kmtnet.conv: SExtractor convolution file
+        - kmtnet.nnw: SExtractor neural network weights file
+        - kmtnet_grid.cat: KMTNet field grid catalog
+    path_cat : str
+        Path to the reference catalog directory containing:
+        - gaiaxp/: GAIA XP reference catalogs
+        - apass/: APASS reference catalogs
+    path_plot : str
+        Path to the output directory for diagnostic plots.
+    mode : str, optional
+        Scaling mode for zero-point correction:
+        - '1DLINEAR': Linear fitting along Y-axis for each amplifier
+        - '2DPOLYNOMIAL': 2D polynomial fitting across X,Y plane for each amplifier
+        Default is '1DLINEAR'.
+    magkey : str, optional
+        Magnitude type to use for photometry ('AUTO', 'APER', etc.).
+        Default is 'AUTO'.
+    zpscaled : float, optional
+        Target zero-point magnitude for scaling. Default is 30.0.
+    pixscale : float, optional
+        Pixel scale in arcseconds per pixel. Default is 0.4.
+    gain : float, optional
+        Detector gain for photometry. Default is 1.0.
+    figure : bool, optional
+        Whether to generate diagnostic plots. Default is False.
+    start : float, optional
+        Start time for elapsed time calculation. Default is None.
+    gridcat : str, optional
+        Name of the KMTNet grid catalog file. Default is 'kmtnet_grid.cat'.
+    
+    Returns
+    -------
+    str
+        Filename of the output scaled image.
+    
+    Notes
+    -----
+    The function performs the following operations:
+    
+    1. **Quality Assurance Check**:
+       - Verifies that astrometric QA has been completed (QARESULT=True)
+       - Checks image pointing against KMTNet field grid
+       - Validates image coordinates and field assignment
+    
+    2. **Reference Catalog Query**:
+       - Loads appropriate reference catalog (GAIA XP or APASS)
+       - Matches image pointing to KMTNet field grid
+       - Downloads reference catalog if not available locally
+    
+    3. **Photometric Analysis**:
+       - Runs SExtractor to detect sources and measure photometry
+       - Applies bad-pixel masks and weight maps if available
+       - Performs source cleaning and quality filtering
+    
+    4. **Amplifier-wise Zero-point Scaling**:
+       - **1D Linear Mode**: Fits linear trend along Y-axis for each amplifier
+       - **2D Polynomial Mode**: Fits 2D polynomial surface across X,Y plane
+       - Uses robust regression (Huber loss) for outlier rejection
+       - Calculates flux scaling factors for each pixel
+    
+    5. **Image Processing**:
+       - Applies zero-point scaling corrections to image data
+       - Removes background and pattern noise
+       - Updates FITS headers with scaling parameters
+    
+    6. **Quality Control**:
+       - Tracks failed amplifier fittings
+       - Updates header with scaling results and quality flags
+       - Generates diagnostic plots if requested
+    
+    Scaling Methods
+    ---------------
+    - **1D Linear**: Corrects Y-axis zero-point variations using linear regression
+    - **2D Polynomial**: Corrects both X and Y zero-point variations using polynomial fitting
+    
+    Quality Criteria
+    ---------------
+    - **Good Amplifier**: Successful fitting with sufficient reference stars
+    - **Bad Amplifier**: Failed fitting or insufficient reference stars
+    - **Overall QA**: Passes if majority of amplifiers are successfully fitted
+    
+    Header Keywords Added
+    ---------------------
+    - PHOTREF: Reference catalog used for photometry
+    - FWHM: Updated seeing value from photometric analysis
+    - SLOPE1-8: Linear slope for each amplifier
+    - OFFSET1-8: Linear offset for each amplifier
+    - FITSTAR1-8: Number of stars used for fitting each amplifier
+    - BADAMP: Binary flag indicating failed amplifiers
+    - PHOTQA: Overall photometric quality assessment
+    - MAGZERO: Target zero-point magnitude
+    - SATURATE: Updated saturation level after scaling
+    - SCALEFIT: Scaling method used
+    
+    Examples
+    --------
+    >>> # 1D Linear scaling
+    >>> zpscale('/path/to/057488.kk.fits', '/path/to/output/', '/path/to/config/',
+    ...         '/path/to/catalogs/', '/path/to/plots/', mode='1DLINEAR',
+    ...         magkey='AUTO', zpscaled=30.0, figure=True)
+    
+    >>> # 2D Polynomial scaling
+    >>> zpscale('/path/to/057488.kk.fits', '/path/to/output/', '/path/to/config/',
+    ...         '/path/to/catalogs/', '/path/to/plots/', mode='2DPOLYNOMIAL',
+    ...         magkey='AUTO', zpscaled=30.0, figure=True)
+    
+    See Also
+    --------
+    ampcom : Amplifier combination function
+    astrom : Astrometric calibration function
+    qatest : Quality assurance function
+    KMTNet_ToO_pipeline : Main pipeline that calls this function
+    
+    Requirements
+    ------------
+    - Input image must have completed astrometric QA (QARESULT=True)
+    - Reference catalogs must be available in path_cat directory
+    - SExtractor configuration files must be present in path_cfg directory
     """
     
     import os
@@ -1720,8 +2041,98 @@ def zpscale(img, path_output, path_cfg, path_cat, path_plot, mode='1DLINEAR', ma
 #%% ToOBadPixelMask.py
 def BPM_update(img, path_cfg):
     """
-    img = '/data8/kmtntoo/data/scaled/240423_CTIO/S240422ed_0749.121-30.R.20240423.CTIO.052188.kk.scaled.fits'
-    path_cfg = '/data8/kmtntoo/config/'
+    Bad Pixel Map (BPM) combining and updating function for KMTNet images.
+    
+    This function combines cosmic ray masks, bad pixel maps, and bad amplifier
+    information to create a comprehensive bad pixel mask for KMTNet images.
+    It integrates multiple types of pixel defects and updates FITS headers
+    with quality assessment information.
+    
+    Parameters
+    ----------
+    img : str
+        Path to the input KMTNet scaled image FITS file. The function expects
+        the corresponding cosmic ray mask file to exist with the same name but
+        with '.mask.fits' extension instead of '.scaled.fits'.
+    path_cfg : str
+        Path to the configuration directory containing:
+        - badpixelmap/: Directory with observatory-specific bad pixel maps
+        - BPM files: Named as '{OBSERVAT}_BPM.{chip*2}.fits'
+    
+    Returns
+    -------
+    None
+        Results are written to the cosmic ray mask file and input image headers.
+    
+    Notes
+    -----
+    The function performs the following operations:
+    
+    1. **File Validation**:
+       - Checks for existence of cosmic ray mask file (.mask.fits)
+       - Verifies bad pixel map file exists for the observatory and chip
+       - Reads observatory and chip information from image header
+    
+    2. **Bad Pixel Map Integration**:
+       - Loads cosmic ray mask from previous processing
+       - Loads observatory-specific bad pixel map
+       - Applies edge masking to exclude dithered regions
+       - Combines multiple types of pixel defects
+    
+    3. **Bad Amplifier Masking**:
+       - Reads BADAMP header keyword to identify failed amplifiers
+       - Masks entire amplifier regions that failed photometric fitting
+       - Updates mask with bad amplifier information
+    
+    4. **Mask Combination**:
+       - Combines cosmic ray mask, bad pixel map, and bad amplifier mask
+       - Creates comprehensive bad pixel mask with different flag values
+       - Updates mask file with combined information
+    
+    5. **Header Updates**:
+       - Adds mask type descriptions to mask file header
+       - Updates original image with quality assessment
+       - Records bad pixel map information in headers
+    
+    Mask Flag Values
+    ---------------
+    - **1**: Cosmic ray affected pixels
+    - **2**: Cross-talk affected pixels  
+    - **4**: Pixel bleeding affected pixels
+    - **8**: CCD bad pixels (from observatory-specific BPM)
+    - **16**: Bad amplifier regions (entire amplifier masked)
+    
+    Quality Assessment
+    ------------------
+    - **PHOTQA = True**: If fewer than 2 amplifiers are bad
+    - **PHOTQA = False**: If 2 or more amplifiers are bad
+    
+    File Requirements
+    -----------------
+    - Input image must have BADAMP header keyword from zpscale function
+    - Cosmic ray mask file (.mask.fits) must exist
+    - Observatory-specific bad pixel map must exist in path_cfg/badpixelmap/
+    
+    Examples
+    --------
+    >>> BPM_update('/path/to/S240422ed_0749.kk.scaled.fits', '/path/to/config/')
+    CR mask and BPM exist for S240422ed_0749.kk.scaled.fits.
+    
+    The function will:
+    - Combine cosmic ray mask with bad pixel map
+    - Mask bad amplifier regions
+    - Update both mask file and original image headers
+    
+    See Also
+    --------
+    zpscale : Zero-point scaling function that creates BADAMP information
+    qatest : Quality assurance function that creates cosmic ray masks
+    KMTNet_ToO_pipeline : Main pipeline that calls this function
+    
+    Notes
+    -----
+    This function is typically called after zpscale to integrate bad pixel
+    information from multiple sources into a single comprehensive mask.
     """
     
     import os
@@ -1783,32 +2194,130 @@ def BPM_update(img, path_cfg):
 #%% ToOImageStackter.py
 def stacking(filename_convention, path_input, path_output, path_cfg, path_ref, combinetype='MEDIAN', start=None, gridcat='kmtnet_grid.cat'):
     """
-    Descriptions:
-        Coadds astronomical images using SWarp, applying masks and updating header information.
-
-    Parameters:
-        filename_convention (str): Regular expression pattern to match filenames against.
-        path_input (str): Path to the input directory containing FITS files.
-        path_output (str): Path where the output stacked images will be saved.
-        path_cfg (str): Path to the configuration directory for SWarp and other tools.
-        path_ref (str): Path to the reference or template images.
-        combinetype (str, optional): Type of pixel combination method to use in SWarp. Defaults to 'MEDIAN'.
-        start (float, optional): Start time of the operation for performance measurement. Defaults to None.
-        gridcat (str, optional): Filename of the predescribed coordinate grid file for KMTNet pointings. Defaults to 'kmtnet_grid.cat'.
-
-    Returns:
-        int: Total number of stacked image sets processed.
-
-    date     = '240915_CTIO'
-    filename_convention = r"(?P<field>.*?_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<band>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<serial>\d{6})\.(?P<chip>\w+)\.(?P<type>scaled|mask)\.fits"
-
-    path_input  = f'/data8/kmtntoo/data/scaled/{date}/'
-    path_output = f'/data8/kmtntoo/data/stack/{date}/'
-    path_cfg    = '/data8/kmtntoo/config/'
-    path_ref    = '/data8/kmtntoo/data/template/'
-    start       = time.time()
-    combinetype = 'MEDIAN'
-    gridcat     = 'kmtnet_grid.cat'
+    Image stacking function for KMTNet chip images using SWarp.
+    
+    This function collects complete sets of four KMTNet chip images (kk, mm, tt, nn) and their
+    corresponding mask images, then stacks them using SWarp to create final stacked images.
+    It performs quality control, coordinate alignment, and generates both science and mask stacks.
+    
+    Parameters
+    ----------
+    filename_convention : str
+        Regular expression pattern to match filenames. Should capture groups for:
+        field, radec, band, date, site, serial, chip, and type (scaled|mask).
+        Example: r"(?P<field>.*?_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<band>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<serial>\d{6})\.(?P<chip>\w+)\.(?P<type>scaled|mask)\.fits"
+    path_input : str
+        Path to the input directory containing scaled and mask FITS files.
+    path_output : str
+        Path where the output stacked images will be saved.
+    path_cfg : str
+        Path to the configuration directory containing:
+        - kmtnet.swarp: SWarp configuration file
+        - mask.swarp: SWarp configuration for mask stacking
+        - kmtnet_grid.cat: KMTNet field grid catalog
+    path_ref : str
+        Path to the reference/template images directory for coordinate alignment.
+    combinetype : str, optional
+        Type of pixel combination method to use in SWarp:
+        - 'MEDIAN': Median combination (default)
+        - 'WEIGHTED': Weighted average combination
+        Default is 'MEDIAN'.
+    start : float, optional
+        Start time of the operation for performance measurement. Default is None.
+    gridcat : str, optional
+        Filename of the KMTNet field grid catalog. Default is 'kmtnet_grid.cat'.
+    
+    Returns
+    -------
+    int
+        Total number of stacked image sets processed.
+    
+    Notes
+    -----
+    The function performs the following operations:
+    
+    1. **File Collection and Organization**:
+       - Scans input directory for scaled and mask FITS files
+       - Groups files by field, band, and observatory
+       - Identifies complete sets of four chip images (kk, mm, tt, nn)
+    
+    2. **Quality Control**:
+       - Checks for QARESULT=True (astrometric QA passed)
+       - Verifies PHOTQA=True (photometric QA passed)
+       - Handles special cases for CTIO nn chip with BADAMP='00000010'
+       - Filters out images that don't meet quality standards
+    
+    3. **Complete Set Identification**:
+       - Ensures all four chips (kk, mm, tt, nn) are available
+       - Groups images by dither position (same serial number)
+       - Only processes complete sets with all four chips
+    
+    4. **Coordinate Alignment**:
+       - Uses reference/template images for coordinate alignment
+       - Falls back to field grid catalog if reference images unavailable
+       - Determines center coordinates for SWarp alignment
+    
+    5. **Image Stacking**:
+       - Creates input file lists for SWarp
+       - Runs SWarp with specified combination type
+       - Generates both science and weight images
+       - Applies coordinate transformation and resampling
+    
+    6. **Mask Stacking**:
+       - Updates mask files with WCS information
+       - Stacks mask images using SWarp
+       - Creates corresponding mask stack files
+    
+    7. **Header Updates**:
+       - Updates stacked image headers with observation information
+       - Records dither information, exposure times, and quality metrics
+       - Adds coordinate and field information
+    
+    Quality Requirements
+    --------------------
+    - **QARESULT=True**: Astrometric quality assurance must pass
+    - **PHOTQA=True**: Photometric quality assurance must pass
+    - **Complete Sets**: All four chips (kk, mm, tt, nn) must be available
+    - **Special Case**: CTIO nn chip with BADAMP='00000010' is accepted
+    
+    Output Files
+    ------------
+    - **Science Stack**: `{obj}_{field}.{radec}.{band}.{date}.{obs}.{exptime}sec.stack.fits`
+    - **Mask Stack**: `{obj}_{field}.{radec}.{band}.{date}.{obs}.{exptime}sec.mstack.fits`
+    
+    Header Keywords Added
+    ---------------------
+    - OBJECT: Object name and field identifier
+    - FIELD1: Field number
+    - FIELD2: Field coordinates
+    - FILTER: Filter band
+    - NUMDITH: Number of dither positions
+    - NUMIMAGE: Number of images stacked
+    - EXPTIME: Total exposure time
+    - DATE-OBS: Average observation date
+    - MEANMJD: Average observation date in MJD
+    - FWHM: Average seeing
+    - MAGZERO: Photometric zero-point
+    - CENTRA/CENTDEC: Center coordinates
+    - SATURATE/UNDERSAT: Saturation levels
+    
+    Examples
+    --------
+    >>> filename_convention = r"(?P<field>.*?_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<band>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<serial>\d{6})\.(?P<chip>\w+)\.(?P<type>scaled|mask)\.fits"
+    >>> stacking(filename_convention, '/path/to/scaled/', '/path/to/stack/', 
+    ...          '/path/to/config/', '/path/to/template/', combinetype='MEDIAN')
+    
+    See Also
+    --------
+    zpscale : Zero-point scaling function that creates input images
+    BPM_update : Bad pixel map function that creates mask images
+    KMTNet_ToO_pipeline : Main pipeline that calls this function
+    
+    Requirements
+    ------------
+    - Input images must have completed astrometric and photometric QA
+    - SWarp configuration files must be present in path_cfg directory
+    - Reference/template images should be available for coordinate alignment
     """
     import numpy as np
     import os, re, time, glob
@@ -1994,25 +2503,129 @@ def stacking(filename_convention, path_input, path_output, path_cfg, path_ref, c
     return total
 #%% ToOsourcecatalog.py
 def catalogmaker(cat, path_output, path_cat, flagcut=0, pixscale=0.4, clsstar=0.8, refmaglower=14, refmagupper=17, apertures=['APER', 'AUTO'], figure=False, path_plot='./', start=None):
-
     """
-    Input: SExtractor output catalog from qa4stackpro
-    Output: mag zero-point, FWHM, 5sigma depth and ref matched catalog
-    cat = r"(?P<field>\w+_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<filter>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<exptime>\d+sec)\.(?P<type>stack)\.fits\.cat"
+    Source catalog generation and zero-point calibration for stacked images.
     
-    date        = '231107_CTIO'
-    cat = f'/data8/kmtntoo/data/stack/{date}/G331903-12-1_9012.020-31.R.20231108.CTIO.600sec.stack.fits.cat'
-    path_output = f'/data8/kmtntoo/data/stack/{date}/'
-    path_cat    = f'/data8/kmtntoo/catalog/'
-    flagcut     = 0
-    pixscale    = 0.4
-    clsstar     = 0.8
-    refmaglower = 14
-    refmagupper = 18
-    apertures   = ['APER', 'AUTO']
-    figure      = True
-    path_plot   = './'
-    start       = None
+    This function processes SExtractor output catalogs from stacked images to generate
+    calibrated source catalogs with zero-point corrections. It does not perform source
+    detection (which is done by the qatest function), but rather calibrates existing
+    photometric measurements against reference catalogs and calculates image depth.
+    
+    Parameters
+    ----------
+    cat : str
+        Path to the SExtractor output catalog file (.cat) from stacked image.
+        Expected naming convention: {obj}_{field}.{radec}.{band}.{date}.{site}.{exptime}sec.stack.fits.cat
+    path_output : str
+        Path to the output directory where calibrated catalogs will be saved.
+    path_cat : str
+        Path to the reference catalog directory containing:
+        - gaiaxp/: GAIA XP reference catalogs
+        - apass/: APASS reference catalogs
+    flagcut : int, optional
+        Maximum FLAGS value to accept for source selection. Default is 0.
+    pixscale : float, optional
+        Pixel scale in arcseconds per pixel. Default is 0.4.
+    clsstar : float, optional
+        Minimum CLASS_STAR value for stellar source selection. Default is 0.8.
+    refmaglower : float, optional
+        Lower magnitude limit for reference catalog matching. Default is 14.
+    refmagupper : float, optional
+        Upper magnitude limit for reference catalog matching. Default is 17.
+    apertures : list, optional
+        List of aperture types to calibrate ('APER', 'AUTO', etc.). Default is ['APER', 'AUTO'].
+    figure : bool, optional
+        Whether to generate diagnostic plots. Default is False.
+    path_plot : str, optional
+        Path to the output directory for diagnostic plots. Default is './'.
+    start : float, optional
+        Start time for elapsed time calculation. Default is None.
+    
+    Returns
+    -------
+    int
+        Returns 0 upon successful completion.
+    
+    Notes
+    -----
+    The function performs the following operations:
+    
+    1. **Catalog Input and Validation**:
+       - Reads SExtractor output catalog from stacked image
+       - Validates that corresponding FITS image exists
+       - Extracts field, band, and observation information from filename
+    
+    2. **Reference Catalog Loading**:
+       - Loads appropriate reference catalog (GAIA XP or APASS)
+       - Matches field information to reference catalog
+       - Determines photometric reference system
+    
+    3. **Source Matching**:
+       - Matches detected sources with reference catalog
+       - Uses adaptive matching radius based on astrometric quality
+       - Performs quality cuts on matched sources
+    
+    4. **Zero-point Calibration**:
+       - Calculates zero-point for each aperture type
+       - Applies zero-point corrections to source magnitudes
+       - Estimates zero-point uncertainty and quality metrics
+    
+    5. **Image Depth Calculation**:
+       - Calculates 5-sigma detection limiting magnitude
+       - Uses background RMS map if available
+       - Falls back to error curve fitting if RMS map unavailable
+    
+    6. **Quality Assessment**:
+       - Calculates photometric precision (RMSE)
+       - Assesses magnitude difference statistics
+       - Generates quality metrics for catalog validation
+    
+    7. **Output Generation**:
+       - Saves calibrated source catalog with zero-point corrections
+       - Updates FITS image headers with photometric information
+       - Generates diagnostic plots if requested
+    
+    Quality Cuts Applied
+    --------------------
+    - **FLAGS ≤ flagcut**: Excludes sources with detection flags
+    - **CLASS_STAR ≥ clsstar**: Selects stellar sources only
+    - **Reference magnitude range**: refmaglower ≤ mag ≤ refmagupper
+    - **Magnitude error limits**: Both input and reference errors ≤ 0.05 mag
+    
+    Output Files
+    ------------
+    - **Calibrated Catalog**: `{basename}.zp.cat` (zero-point corrected catalog)
+    - **Diagnostic Plot**: `{field}_{band}_{aperture}_phot.png` (if figure=True)
+    
+    Header Keywords Added
+    ---------------------
+    - PHOTREF: Reference catalog used for calibration
+    - FWHM: Median seeing of point sources [arcsec]
+    - MAGZERO: Photometric zero-point for MAG_AUTO [ABmag]
+    - ZEROERR: Standard deviation of zero-point [ABmag]
+    - ZPSTAR: Number of stars used for zero-point calculation
+    - RMSPHOT: RMSE of reference vs. KMTNet magnitudes
+    - DEPTH5: 5-sigma detection limiting magnitude
+    - MATCHRAD: Matching radius with reference catalog [arcsec]
+    - CLSSTAR: CLASS_STAR cut used for analysis
+    
+    Examples
+    --------
+    >>> catalogmaker('/path/to/G331903-12-1_9012.020-31.R.20231108.CTIO.600sec.stack.fits.cat',
+    ...              '/path/to/output/', '/path/to/catalogs/', flagcut=0, clsstar=0.8,
+    ...              refmaglower=14, refmagupper=17, apertures=['APER', 'AUTO'], figure=True)
+    
+    See Also
+    --------
+    qatest : Quality assurance function that performs source detection
+    stacking : Image stacking function that creates input stacked images
+    KMTNet_ToO_pipeline : Main pipeline that calls this function
+    
+    Notes
+    -----
+    This function is typically called after qatest has performed source detection
+    on stacked images. It focuses on photometric calibration rather than source
+    detection, making it complementary to the qatest function.
     """
 
     import time
@@ -2226,28 +2839,166 @@ def catalogmaker(cat, path_output, path_cat, flagcut=0, pixscale=0.4, clsstar=0.
 #%% ToOTransientSearch.py
 def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_config, div_col=4, div_row=4, pixscale=0.4, ncore=1, detect=1.5, cutsize=1.0, twoway_subt=False, psf_analysis=False):
     """
-    Input: Photometric catalog from KMTNet_ToO.catalogmaker()
-    Input: Stacked KMTNet image after astrometry & photometry (Science & Reference)
-    Output: science, reference and subtraction snapshot images for transient candidates
-    sciimg = r"(?P<field>\w+_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<filter>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<exptime>\d+sec)\.(?P<type>stack)\.fits"
-
-    Args:
-    date        = '250831_SAAO'
-    simg        = 'TOO_0578_0578.316-78.I.20250831.SAAO.480sec.stack.fits'
-    sciimg      = f'/data8/kmtntoo/data/stack/{date}/{simg}'
-    path_ref    = '/data8/KS4/database/stack/'
-    path_cat    = f'/data8/kmtntoo/data/stack/{date}/'
-    path_refcat = '/data8/KS4/database/stack/'
-    path_output = f'/data8/kmtntoo/data/subt/{date}/'
-    path_config = '/data8/kmtntoo/config/'
-    div_col     = 4
-    div_row     = 4
-    pixscale    = 0.4
-    ncore       = 4
-    detect      = 1.5
-    cutsize     = 1.0
-    twoway_subt =False
-    psf_analysis=False
+    Image subtraction and transient candidate detection for KMTNet stacked images.
+    
+    This function performs difference image analysis (DIA) by subtracting reference images
+    from science images to detect transient candidates. It uses HOTPANTs for image
+    subtraction, applies comprehensive source flagging to filter artifacts, and generates
+    cutout images for potential transient candidates.
+    
+    Parameters
+    ----------
+    sciimg : str
+        Path to the science stacked image FITS file. Expected naming convention:
+        {obj}_{field}.{radec}.{band}.{date}.{site}.{exptime}sec.stack.fits
+    path_ref : str
+        Path to the reference image directory containing:
+        - ks4*{band}*.stack.fits: KMTNet reference images
+        - ps1*{band}*.stack.fits: Pan-STARRS reference images
+    path_cat : str
+        Path to the science image catalog directory containing:
+        - {basename}.zp.cat: Zero-point calibrated source catalogs
+    path_refcat : str
+        Path to the reference catalog directory containing:
+        - ks4_{field}.{radec}*{band}*.zp.fits: Reference image catalogs
+    path_output : str
+        Path to the output directory where subtraction results will be saved.
+    path_config : str
+        Path to the configuration directory containing:
+        - kmtnet.sex: SExtractor configuration file
+        - kmtnet_imask.param: SExtractor parameters file
+        - kmtnet.nnw: SExtractor neural network weights file
+        - kmtnet.conv: SExtractor convolution file
+        - kmtnet.psfex: PSFEx configuration file (if psf_analysis=True)
+    div_col : int, optional
+        Number of columns for image subdivision in HOTPANTs. Default is 4.
+    div_row : int, optional
+        Number of rows for image subdivision in HOTPANTs. Default is 4.
+    pixscale : float, optional
+        Pixel scale in arcseconds per pixel. Default is 0.4.
+    ncore : int, optional
+        Number of CPU cores for parallel processing. Default is 1.
+    detect : float, optional
+        Detection threshold for SExtractor. Default is 1.5.
+    cutsize : float, optional
+        Size of cutout images in arcseconds. Default is 1.0.
+    twoway_subt : bool, optional
+        Whether to perform subtraction in both directions (science-ref and ref-science).
+        Default is False.
+    psf_analysis : bool, optional
+        Whether to perform PSF analysis using PSFEx. Default is False.
+    
+    Returns
+    -------
+    int
+        Returns 0 upon successful completion.
+    
+    Notes
+    -----
+    The function performs the following operations:
+    
+    1. **Image Set Preparation**:
+       - Loads science stacked image and validates existence
+       - Searches for reference images (KMTNet, Pan-STARRS, or generates Pan-STARRS)
+       - Creates mask image combining science and reference masks
+       - Validates complete image set (science, reference, mask)
+    
+    2. **Source Catalog Preparation**:
+       - Loads science image photometric catalog (.zp.cat)
+       - Attempts to load reference image catalog for matching
+       - Creates stamp catalog for HOTPANTs subtraction
+       - Applies quality cuts (FLAGS=0, CLASS_STAR>0.8, magnitude range)
+    
+    3. **Image Subtraction**:
+       - Determines convolution direction based on seeing comparison
+       - Runs HOTPANTs for image subtraction with subdivision
+       - Supports both single-direction and two-way subtraction
+       - Generates convolved and subtracted images
+    
+    4. **Source Detection**:
+       - Runs SExtractor on subtracted image to detect sources
+       - Optionally performs PSF analysis with PSFEx
+       - Creates inverted image for artifact detection
+       - Detects sources in inverted image for comparison
+    
+    5. **Comprehensive Source Flagging**:
+       - **Flag 0**: Asteroid/moving object matching using Skybot
+       - **Flag 1**: Inverted image detections (artifacts around sources)
+       - **Flag 2**: SExtractor flags and bad pixel masking
+       - **Flag 3**: High ellipticity compared to other sources
+       - **Flag 4**: Unusual FWHM compared to other sources
+       - **Flag 5**: Weird background values (2-sigma outliers)
+       - **Flag 6**: Low signal-to-noise ratio (SNR < 5)
+       - **Flag 7**: Crosstalk contamination from bright sources
+       - **Flag 8**: HOTPANTs chi-squared values (poor subtraction regions)
+       - **Flag 9**: PSFEx analysis (if enabled)
+    
+    6. **Transient Candidate Selection**:
+       - Combines all flags to identify clean transient candidates
+       - Excludes flagged sources from final candidate list
+       - Generates transient candidate catalog
+       - Creates summary log with flagging statistics
+    
+    7. **Snapshot Generation**:
+       - Generates cutout images for each transient candidate
+       - Supports parallel processing for multiple candidates
+       - Creates science, reference, and subtraction cutouts
+       - Saves snapshots in organized directory structure
+    
+    Quality Cuts Applied
+    --------------------
+    - **FLAGS = 0**: Excludes sources with detection flags
+    - **CLASS_STAR > 0.8**: Selects stellar sources only
+    - **Magnitude range**: 14 < MAG_AUTO < 20
+    - **SNR threshold**: SNR_WIN > 5 (for flagging)
+    - **Ellipticity**: ratio_elong < 4 (for flagging)
+    - **FWHM**: 0.5 < ratio_seeing < 2.5 (for flagging)
+    
+    Output Files
+    ------------
+    - **Calibrated Science**: `{basename}_Calib.fits`
+    - **Reference Image**: `{basename}_REF.fits`
+    - **Mask Image**: `{basename}_MASK.fits`
+    - **Convolved Image**: `{basename}_hcCONV.fits`
+    - **Subtracted Image**: `{basename}_hdCalib.fits`
+    - **Source Catalog**: `{basename}_hdCalib.cat`
+    - **Transient Catalog**: `{basename}_hdCalib.transient.cat`
+    - **Summary Log**: `{basename}_hdCalib.summary.txt`
+    - **Snapshots**: `snap/` directory with cutout images
+    
+    Flagging System
+    ---------------
+    The function uses a comprehensive 10-flag system to identify and filter artifacts:
+    
+    - **Flag 0**: Solar system objects (asteroids, comets)
+    - **Flag 1**: Subtraction artifacts (detected in inverted image)
+    - **Flag 2**: Bad pixels and detection flags
+    - **Flag 3**: Non-stellar morphology (high ellipticity)
+    - **Flag 4**: Unusual seeing (too sharp or too broad)
+    - **Flag 5**: Background anomalies
+    - **Flag 6**: Low signal-to-noise ratio
+    - **Flag 7**: Crosstalk contamination
+    - **Flag 8**: Poor subtraction quality regions
+    - **Flag 9**: PSF analysis failures
+    
+    Examples
+    --------
+    >>> subtraction('/path/to/TOO_0578_0578.316-78.I.20250831.SAAO.480sec.stack.fits',
+    ...             '/path/to/reference/', '/path/to/catalogs/', '/path/to/refcatalogs/',
+    ...             '/path/to/output/', '/path/to/config/', div_col=4, div_row=4,
+    ...             ncore=4, detect=1.5, cutsize=1.0, twoway_subt=False, psf_analysis=False)
+    
+    See Also
+    --------
+    catalogmaker : Source catalog generation function
+    stacking : Image stacking function that creates input stacked images
+    KMTNet_ToO_pipeline : Main pipeline that calls this function
+    
+    Notes
+    -----
+    This function is the core of the transient detection pipeline, combining
+    sophisticated image subtraction with comprehensive artifact filtering to
+    identify genuine transient candidates while minimizing false positives.
     """
 
     import shutil
@@ -2666,6 +3417,7 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
     #------------------------------------------------------------
     #    Final flag
     #------------------------------------------------------------
+    # TODO: Force unflag sources already reported as transients or located near putative host galaxies.
     subtbl['flag'] = False
     flag    = subtbl['flag']
     n_all   = len(subtbl)
