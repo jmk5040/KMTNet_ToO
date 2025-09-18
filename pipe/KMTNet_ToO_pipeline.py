@@ -1,6 +1,6 @@
 #%% path defines
 import time, os, sys, glob, re, copy, shutil, subprocess
-path_base   = '/data4/kmtntoo/tutorial/'
+path_base   = '/data8/kmtntoo/'
 
 path_data   = os.path.join(path_base, 'data/')
 path_cfg    = os.path.join(path_base, 'config/')
@@ -10,19 +10,20 @@ path_raw    = os.path.join(path_data, 'raw/')
 path_scale  = os.path.join(path_data, 'scaled/')
 path_stack  = os.path.join(path_data, 'stack/')
 path_subt   = os.path.join(path_data, 'subt/')
-path_tmpl   = os.path.join(path_data, 'template/')
+path_tmpl   = '/data8/KS4/database/stack/'
 
 path_res    = os.path.join(path_base, 'result/')
 path_plot   = os.path.join(path_res, 'plot/')
 path_log    = os.path.join(path_res, 'log/')
+
 #%% KMTNet ToO Pipeline
 from astropy.io import fits
 from datetime import datetime
 from astropy.table import Table, vstack
 import KMTNet_ToO_functions as pipe
+import logging
 
-def ToO_pipeline(date, field_info='kmtnet_grid.cat'):
-# def ToO_pipeline(date, field_info='ToO_grid.cat'):
+def ToO_pipeline(date, field_info='kmtnet_grid.fits'):
     
     # start of the process
     start = time.time()
@@ -30,15 +31,15 @@ def ToO_pipeline(date, field_info='kmtnet_grid.cat'):
     print(f'Field/Tiling coordinate information referring to {field_info}.')
     
     # process managements
-    ampcompro   = True
-    astrompro   = True
-    astromqapro = True
-    zpscalepro  = True
-    bpmaskpro   = True
-    stackingpro = True
-    qa4stackpro = True
-    catalogpro  = True
-    subtpro     = True
+    ampcompro   = False
+    astrompro   = False
+    astromqapro = False
+    zpscalepro  = False
+    bpmaskpro   = False
+    stackingpro = False
+    qa4stackpro = False
+    catalogpro  = False
+    subtpro     = False
     rbclasspro  = True
 
     process_status = {
@@ -282,17 +283,20 @@ def ToO_pipeline(date, field_info='kmtnet_grid.cat'):
     print(f'Image subtraction process done.\t {endsubt-start:.2f}sec')
     
     if rbclasspro:
-        # ML R/B classifications for the snapshot images
-        command = ['python', 'rbclass_kmtnet/inference.py', '--dir_fits', path_output5, '--dir_ckpt', 'rbclass_kmtnet/ckpt', '--ckpt_name', 'model:OTrain_imsize:51_channels:rns_normalize:minmax_name:ri+ngi+gd_seed:0.bin']
-        result = subprocess.run(command, capture_output=True, text=True)
+        
+        if len(os.listdir(path_output5)) > 0:
+            command = ['python', 'rbclass_kmtnet/inference.py', '--dir_fits', path_output5, '--dir_ckpt', 'rbclass_kmtnet/ckpt', '--ckpt_name', 'model:OTrain_imsize:51_channels:rns_normalize:minmax_name:ri+ngi+gd_seed:0.bin']
+            result = subprocess.run(command, capture_output=True, text=True)
 
-        # Check result
-        if result.returncode == 0:
-            print("inference.py executed successfully.")
-            print(result.stdout)
+            # Check result
+            if result.returncode == 0:
+                print("inference.py executed successfully.")
+                print(result.stdout)
+            else:
+                print("inference.py execution failed.")
+                print(result.stderr)
         else:
-            print("inference.py execution failed.")
-            print(result.stderr)
+            print(f"No files found in {path_output5}. Skipping rbclasspro subprocess.")
 
         log9            = copy.deepcopy(log)
         log9['process'] = 'rbclasspro'
@@ -335,7 +339,7 @@ class TooWatcher(FileSystemEventHandler):
         self.pool               = multiprocessing.Pool(processes=ncores)
 
     # creation checking sequences
-    def on_created(self, event, max_wait_time=900, wait_interval=5):
+    def on_created(self, event, max_wait_time=600, wait_interval=5):
         
         # KMTNet image check (unimpaired)
         pattern = r'kmt[asc]\.\d{8}\.\d{6}\.fits'
@@ -352,6 +356,9 @@ class TooWatcher(FileSystemEventHandler):
         file_path = event.src_path
         file_name = os.path.basename(file_path)
         if not os.path.isfile(file_path): return # this event is not a file upload
+        
+        # Log the detection of a new file
+        logging.info(f"Detected new file: {file_name} at {file_path}")
         
         # observatory check (SAAO, SSO, CTIO)
         try:
@@ -379,7 +386,11 @@ class TooWatcher(FileSystemEventHandler):
                     print(f"Lost File {file_path}")
                     return
 
+            # Log file size check
+            # logging.info(f"Checking file size for {file_name}: {file_size} bytes")
+
             if file_size >= file_sizes[location]:
+                logging.info(f"File upload complete: {file_name} ({file_size} bytes)")
                 time.sleep(1)
                 # Check if the file name matches the expected pattern
                 if not re.match(pattern, file_name):
@@ -409,7 +420,11 @@ class TooWatcher(FileSystemEventHandler):
                     # files to directory (yyyymmdd_SITE)
                     os.makedirs(process_directory, exist_ok=True)
                     for file in files:
-                        shutil.move(os.path.join(self.watch_directory, file), os.path.join(process_directory, file))
+                        src = os.path.join(self.watch_directory, file)
+                        dst = os.path.join(process_directory, file)
+                        if os.path.exists(dst):
+                            os.remove(dst)  # Remove the existing file
+                        shutil.move(src, dst)
                     # run the pipeline
                     if self.ncores == 1:
                         ToO_pipeline(os.path.basename(process_directory))
@@ -482,7 +497,6 @@ class TooWatcher(FileSystemEventHandler):
 
 #%% main program
 if __name__ == "__main__":
-    
     # Add command line argument parsing
     parser = argparse.ArgumentParser(description="KMTNet_ToO_pipeline.py")
     parser.parse_args()
@@ -500,6 +514,13 @@ if __name__ == "__main__":
     user_input = input('Enter the directory name to process, or type ‘AUTO’ to start automatic monitoring of new uploads: ')
 
     if user_input == "AUTO":
+        # Set up logging
+        logging.basicConfig(
+            filename=f'{path_log}file_uploads.log',
+            level=logging.INFO,
+            format='%(asctime)s %(levelname)s: %(message)s'
+        )
+
         print('KMTNet ToO Data WatchDog Activated: Looking for kmtx.00000000.000000.fits')
         observer = Observer()
         event_handler = TooWatcher(watch_directory, ncores)
@@ -520,4 +541,3 @@ if __name__ == "__main__":
             ToO_pipeline(user_input)
         else:
             print(f'Check if {os.path.join(watch_directory, user_input)} exists.')
-    # regular watchdog

@@ -5,26 +5,26 @@
 #-------------------------------- Catalog ------------------------------------
  
 CATALOG_NAME     dummy.cat      # name of the output catalog
-CATALOG_TYPE     ASCII_HEAD     # NONE,ASCII,ASCII_HEAD, ASCII_SKYCAT,
+CATALOG_TYPE     FITS_LDAC      # NONE,ASCII,ASCII_HEAD, ASCII_SKYCAT,
                                 # ASCII_VOTABLE, FITS_1.0 or FITS_LDAC
 PARAMETERS_NAME  kmtnet.param   # name of the file containing catalog contents
  
 #------------------------------- Extraction ----------------------------------
  
 DETECT_TYPE      CCD            # CCD (linear) or PHOTO (with gamma correction)
-DETECT_MINAREA   9              # min. # of pixels above threshold
+DETECT_MINAREA   5              # min. # of pixels above threshold
 DETECT_MAXAREA   0              # max. # of pixels above threshold (0=unlimited)
 THRESH_TYPE      RELATIVE       # threshold type: RELATIVE (in sigmas)
                                 # or ABSOLUTE (in ADUs)
-DETECT_THRESH    1.5            # <sigmas> or <threshold>,<ZP> in mag.arcsec-2
-ANALYSIS_THRESH  1.5            # <sigmas> or <threshold>,<ZP> in mag.arcsec-2
+DETECT_THRESH    5.0            # <sigmas> or <threshold>,<ZP> in mag.arcsec-2
+ANALYSIS_THRESH  5.0            # <sigmas> or <threshold>,<ZP> in mag.arcsec-2
  
 FILTER           Y              # apply filter for detection (Y or N)?
 FILTER_NAME      default.conv   # name of the file containing the filter
 FILTER_THRESH                   # Threshold[s] for retina filtering
  
 DEBLEND_NTHRESH  32             # Number of deblending sub-thresholds
-DEBLEND_MINCONT  0.00005        # Minimum contrast parameter for deblending
+DEBLEND_MINCONT  0.005          # Minimum contrast parameter for deblending
  
 CLEAN            Y              # Clean spurious detections? (Y or N)?
 CLEAN_PARAM      1.0            # Cleaning efficiency
@@ -36,7 +36,7 @@ MASK_TYPE        CORRECT        # type of detection MASKing: can be one of
 
 WEIGHT_TYPE      NONE           # type of WEIGHTing: NONE, BACKGROUND,
                                 # MAP_RMS, MAP_VAR or MAP_WEIGHT
-RESCALE_WEIGHTS  Y              # Rescale input weights/variances (Y/N)?
+#RESCALE_WEIGHTS  Y              # Rescale input weights/variances (Y/N)?
 WEIGHT_IMAGE     weight.fits    # weight-map filename
 WEIGHT_GAIN      Y              # modulate gain (E/ADU) with weights? (Y/N)
 WEIGHT_THRESH                   # weight threshold[s] for bad pixels
@@ -44,7 +44,7 @@ WEIGHT_THRESH                   # weight threshold[s] for bad pixels
 #-------------------------------- FLAGging -----------------------------------
 
 FLAG_IMAGE       flag.fits      # filename for an input FLAG-image
-FLAG_TYPE        MAX            # flag pixel combination: OR, AND, MIN, MAX
+FLAG_TYPE        OR             # flag pixel combination: OR, AND, MIN, MAX
                                 # or MOST
 
 #------------------------------ Photometry -----------------------------------
@@ -62,13 +62,13 @@ SATUR_KEY        SATURATE       # keyword for saturation level (in ADUs)
  
 MAG_ZEROPOINT    0.0            # magnitude zero-point
 MAG_GAMMA        4.0            # gamma of emulsion (for photographic scans)
-GAIN             1.0            # detector gain in e-/ADU
+GAIN             0.0            # detector gain in e-/ADU
 GAIN_KEY         GAIN           # keyword for detector gain in e-/ADU
 PIXEL_SCALE      0.4            # size of pixel in arcsec (0=use FITS WCS info)
  
 #------------------------- Star/Galaxy Separation ----------------------------
  
-SEEING_FWHM      2.0            # stellar FWHM in arcsec
+SEEING_FWHM      1.8            # stellar FWHM in arcsec
 STARNNW_NAME     default.nnw    # Neural-Network_Weight table filename
  
 #------------------------------ Background -----------------------------------

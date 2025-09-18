@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #%% Import packages
+import warnings
 import numpy as np
 import astropy.units as u
 import os, re, glob, time
@@ -8,555 +9,18 @@ from astropy.io import fits
 from astropy.table import Table
 import matplotlib.pyplot as plt
 from astropy.coordinates import SkyCoord
-#%% General Functions
-def rss(numlist):
-    S   = 0
-    for i in range(len(numlist)):
-        S   += numlist[i]**2
-    sqS     = np.sqrt(S)
-    return sqS
-#------------------------------------------------------------
-def apass_query(ra, dec, radius=1.0): # unit=(deg, deg, arcsec)
-
-    import astropy.coordinates as coord
-    from astroquery.vizier import Vizier 
-
-    """
-    APASS QUERY
-    INPUT   :   RA [deg], Dec [deg], radius
-    OUTPUT  :   QUERY TABLE
-    #   Vega    : B, V
-    #   AB      : g, r, i
-    #   Vega - AB Magnitude Conversion (Blanton+07)
-    #   B       : m_AB - m_Vega =-0.09
-    #   V       : m_AB - m_Vega = 0.02
-    #   R       : m_AB - m_Vega = 0.21
-    #   I       : m_AB - m_Vega = 0.45
-    """
-    Vizier.ROW_LIMIT    = -1
-    query       = Vizier.query_region(coord.SkyCoord(ra=ra, dec=dec, unit=(u.deg, u.deg), frame='icrs'), width=str(radius*60)+'m', catalog=["APASS9"])
-    dum         = query[0]
-    colnames    = dum.colnames
-    
-    for col in colnames:
-        indx    = np.where(dum[col].mask == False)
-        dum     = dum[indx]
-        
-    querycat    = Table()
-    querycat['RAJ2000'] = dum['RAJ2000']
-    querycat['DEJ2000'] = dum['DEJ2000']
-    querycat['Numb_obs']= dum['nobs']
-    querycat['Numb_img']= dum['mobs']
-    querycat['B-V']     = dum['B-V']+ (-0.09 - 0.02)
-    querycat['e_B-V']   = dum['e_B-V']
-    # querycat['Bmag']    = dum['Bmag']   - 0.09  # [Vega] to [AB]
-    querycat['Bmag']    = dum['Bmag'] - 0.09 - 0.27 * (dum['B-V'] - (0.09 + 0.02))  # Park+19
-    querycat['e_Bmag']  = dum['e_Bmag']
-    querycat['Vmag']    = dum['Vmag']   + 0.02  # [Vega] to [AB]
-    querycat['e_Vmag']  = dum['e_Vmag']
-    querycat['Rmag']    = dum['r_mag'] - 0.0576 - 0.3718 * (dum['r_mag'] - dum['i_mag'] - 0.2589) # Blanton+07, sigma = 0.0072
-    querycat['e_Rmag']  = dum['e_r_mag']
-    # querycat['Imag']    = dum['r_mag'] - 1.2444 * (dum['r_mag'] - dum['i_mag']) - 0.3820 + 0.45 # Lupton+05, sigma = 0.0078
-    querycat['Imag']    = dum['i_mag'] # Park+19
-    querycat['e_Imag']  = dum['e_i_mag']
-
-    return querycat
-#------------------------------------------------------------
-def GAIAXP_query(field, path_ref):
-    """
-    field = '0000'
-    path_ref = '/data4/kmtntoo/cat/gaiaxp/'
-    """
-    field = field.split('.')[0]
-    refcat  = Table(fits.open(os.path.join(path_ref, f'gaiaxp_{field}.fits'))[1].data)
-    refcat.rename_columns(['RA', 'DEC'], ['RAJ2000', 'DEJ2000'])
-    refcat['Bmag'] = refcat['XP_B'] - 0.30 * (refcat['XP_B']-refcat['XP_V'])
-    refcat['Rmag'] = refcat['XP_R'] - 0.04 * (refcat['XP_V']-refcat['XP_R'])
-    refcat.rename_columns(['XP_eB'], ['e_Bmag'])
-    refcat.rename_columns(['XP_V', 'XP_eV'], ['Vmag', 'e_Vmag'])
-    refcat.rename_columns(['XP_eR'], ['e_Rmag'])
-    refcat.rename_columns(['XP_I', 'XP_eI'], ['Imag', 'e_Imag'])
-
-    return refcat
-#------------------------------------------------------------
-def sort_BVRI(imlist):
-    newlist     = []
-    ks4ftr  = ['B', 'V', 'R', 'I']
-    for ftr in ks4ftr:
-        for i in range(len(imlist)):
-            if ftr in imlist[i]:
-                newlist.append(imlist[i])
-    return newlist
-#------------------------------------------------------------
-def limitmag(N, zp, aper, skysigma): # 3? 5?, zp, diameter [pixel], skysigma
-
-    R           = float(aper)/2.                # to radius
-    braket      = N*skysigma*np.sqrt(np.pi*(R**2))
-    upperlimit  = float(zp)-2.5*np.log10(braket)
-
-    return round(upperlimit, 3)
-#------------------------------------------------------------
-def matching(intbl, reftbl, inra, indec, refra, refdec, sep=2.0):
-    """
-    MATCHING TWO CATALOG WITH RA, Dec COORD. WITH python
-    INPUT   :   SE catalog, SDSS catalog file name, sepertation [arcsec]
-    OUTPUT  :   MATCED CATALOG FILE & TABLE
-    """
-
-    incoord     = SkyCoord(inra, indec, unit=(u.deg, u.deg))
-    refcoord    = SkyCoord(refra, refdec, unit=(u.deg, u.deg))
-
-    #   INDEX FOR REF.TABLE
-    indx, d2d, d3d  = incoord.match_to_catalog_sky(refcoord)
-    mreftbl         = reftbl[indx]
-    mreftbl['sep']  = d2d
-    mergetbl        = intbl
-    for col in mreftbl.colnames:
-        mergetbl[col]    = mreftbl[col]
-    indx_sep        = np.where(mergetbl['sep']*3600.<sep)
-    mtbl            = mergetbl[indx_sep]
-    #mtbl.write(mergename, format='ascii', overwrite=True)
-    return mtbl
-#------------------------------------------------------------
-def star4zp(intbl, inmagerkey, refmagkey, refmagerkey, refmaglower=14., refmagupper=17., refmagerupper=0.05, inmagerupper=0.1, flagcut=0):
-    """
-    SELECT STARS FOR USING ZEROPOINT CALCULATION
-    INPUT   :   TABLE, IMAGE MAG.ERR KEYWORD, REF.MAG. KEYWORD, REF.MAG.ERR KEYWORD
-    OUTPUT  :   NEW TABLE
-    """
-    indx    = np.where( (intbl['FLAGS'] <= flagcut) & 
-                        (intbl[refmagkey] < refmagupper) & 
-                        (intbl[refmagkey] > refmaglower) & 
-                        (intbl[refmagerkey] < refmagerupper) &
-                        (intbl[inmagerkey] < inmagerupper) 
-                        )
-    indx0   = np.where( (intbl['FLAGS'] <= flagcut) )
-    indx2   = np.where( (intbl[refmagkey] < refmagupper) & 
-                        (intbl[refmagkey] > refmaglower) & 
-                        (intbl[refmagerkey] < refmagerupper) 
-                        )
-    indx3   = np.where( (intbl[inmagerkey] < inmagerupper) )
-    newtbl  = intbl[indx]
-    comment = '-'*60+'\n' \
-            + 'ALL\t\t\t\t: '+str(len(intbl))+'\n' \
-            + '-'*60+'\n' \
-            + 'FLAG(<={})\t\t\t: '.format(flagcut)+str(len(indx0[0]))+'\n' \
-            + refmagkey+' REF. MAGCUT ('+str(refmaglower)+'-'+str(refmagupper)+')'+'\t\t: '+str(len(indx2[0]))+'\n' \
-            + refmagerkey+' REF. MAGERR CUT < '+str(refmagerupper)+'\n' \
-            + inmagerkey+' OF IMAGE CUT < '+str(inmagerupper)+'\t: '+str(len(indx3[0]))+'\n' \
-            + '-'*60+'\n' \
-            + 'TOTAL #\t\t\t\t: '+str(len(indx[0]))+'\n' \
-            + '-'*60
-    print(comment)
-    return newtbl
-#------------------------------------------------------------
-def zpcal(intbl, inmagkey, inmagerkey, refmagkey, refmagerkey, sigma=2.0):
-    """
-    ZERO POINT CALCULATION
-    3 SIGMA CLIPPING (MEDIAN)
-    """
-    from astropy.stats import sigma_clip
-
-    #    REMOVE BLANK ROW (=99)    
-    indx_avail      = np.where( (intbl[inmagkey] != 99) & (intbl[refmagkey] != 99) )
-    intbl           = intbl[indx_avail]
-    zplist          = np.copy(intbl[refmagkey] - intbl[inmagkey])
-    intbl['zp']     = zplist
-    #    SIGMA CLIPPING
-    zplist_clip     = sigma_clip(zplist, sigma=sigma, maxiters=None, cenfunc=np.median, copy=False)
-    indx_alive      = np.where( zplist_clip.mask == False )
-    indx_exile      = np.where( zplist_clip.mask == True )
-    #    RE-DEF. ZP LIST AND INDEXING CLIPPED & NON-CLIPPED
-    intbl_alive     = intbl[indx_alive]
-    intbl_exile     = intbl[indx_exile]
-    #    ZP & ZP ERR. CALC.
-    zp              = np.median(np.copy(intbl_alive['zp']))
-    zper            = np.std(np.copy(intbl_alive['zp']))
-    return zp, zper, intbl_alive, intbl_exile
-#------------------------------------------------------------
-def add_colorbar(mappable, clabel, clim):
-
-    from mpl_toolkits.axes_grid1 import make_axes_locatable
-
-    last_axes = plt.gca()
-    ax = mappable.axes
-    fig = ax.figure
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="5%", pad=0.05)
-    cbar = fig.colorbar(mappable, cax=cax)
-    cbar.set_label(clabel)
-    cbar.mappable.set_clim(clim[0], clim[1])
-    plt.sca(last_axes)
-#------------------------------------------------------------
-def date2MJD(dateobs):
-
-    from astropy.time import Time
-
-    return Time(dateobs, format='isot', scale='utc').mjd
-#------------------------------------------------------------
-def MJD2date(mjd):
-    
-    from datetime import datetime, timedelta
-    
-    jd = mjd + 2400000.5
-    delta = jd - 2440587.5
-    timestamp = timedelta(days=delta)
-    date = datetime.utcfromtimestamp(timestamp.total_seconds())
-    return date.strftime("%Y-%m-%dT%H:%M:%S")
-#------------------------------------------------------------
-def create_ldac_fits(input_fits, output_ldac, centrakey='X_WORLD', centdeckey='Y_WORLD', magkey='MAG', center=None, radius=None):
-    with fits.open(input_fits) as hdul:
-        data_table = Table(hdul[1].data)
-        # Rename columns
-        try:
-            data_table.rename_column('RA', centrakey)
-            data_table.rename_column('DEC', centdeckey)
-        except:
-            data_table.rename_column('ALPHAJ2000', centrakey)
-            data_table.rename_column('DELTAJ2000', centdeckey)
-        
-        data_table['ERRA_WORLD'] = np.full(len(data_table), 0.0001)  # default small error in degrees
-        data_table['ERRB_WORLD'] = np.full(len(data_table), 0.0001)
-        
-        try:
-            data_table[magkey] = data_table['XP_V']  # default magnitude
-            data_table = data_table[data_table['XP_Vflag']==1] # gaia XP flag
-            data_table = data_table[np.abs(data_table['cstar'])<0.05] # star-like
-        except:
-            data_table[magkey] = np.full(len(data_table), 16)  # default magnitude
-
-        # Filter the table if center and radius are provided
-        if center is not None and radius is not None:
-            catalog_coords = SkyCoord(ra=data_table[centrakey]*u.degree, dec=data_table[centdeckey]*u.degree)
-            separation = center.separation(catalog_coords)
-            data_table = data_table[separation < radius * u.degree]
-
-        ldac_hdulist = fits.HDUList()
-        primary_hdu = fits.PrimaryHDU()
-        ldac_hdulist.append(primary_hdu)
-
-        header_hdu = fits.ImageHDU()
-        header_hdu.header.extend(hdul[1].header, unique=True)
-        header_hdu.header['EXTNAME'] = 'LDAC_IMHEAD'
-        header_hdu.header['TDIM1'] = '(1024)'  # Example, adjust based on your data structure
-
-        ldac_hdulist.append(header_hdu)
-
-        bintable_hdu = fits.BinTableHDU(data_table)
-        bintable_hdu.header['EXTNAME'] = 'LDAC_OBJECTS'
-        ldac_hdulist.append(bintable_hdu)
-
-        ldac_hdulist.writeto(output_ldac, overwrite=True)
-#--------------for trasient searching------------------------
-def hotpants(inim, refim, inmsk, refmsk, convdir='t', normdir='i', outim='hd.fits', convim='hc.fits', nrx=4, nry=4, stamp=None):
-    '''
-    inim : Science image
-    refim : Reference image
-    convdir: convolution direction ('t' for reference, 'i' for science)
-    [-c  toconvolve]  : force convolution on (t)emplate or (i)mage (undef)
-    [-n  normalize]   : normalize to (t)emplate, (i)mage, or (u)nconvolved (t)
-    '''
-    if stamp is None:
-        com = f'hotpants -c {convdir} -n {normdir} -iu 100000000 -il -100000 -tu 100000000 -tl -100000 -v 0 -inim {inim} -tmplim {refim} -imi {inmsk} -tmi {refmsk} -outim {outim} -oci {convim} -nrx {nrx} -nry {nry}'
-    else:
-        stampname   = outim.replace('.fits', '.stamp')
-        with open(stampname, "w") as f:
-            for s in stamp:
-                f.write(f"{s['X_IMAGE']} {s['Y_IMAGE']} \n")
-        com = f'hotpants -c {convdir} -n {normdir} -iu 100000000 -il -100000 -tu 100000000 -tl -100000 -v 0 -inim {inim} -tmplim {refim} -imi {inmsk} -tmi {refmsk} -outim {outim} -oci {convim} -ssf {stampname} -nrx {nrx} -nry {nry}'
-    print(com)
-    os.system(com)
-#------------------------------------------------------------
-def invert_image(inim, outim):
-    data, hdr = fits.getdata(inim, header=True)
-    invdata = data*(-1)
-    fits.writeto(outim, invdata, header=hdr, overwrite=True)
-#------------------------------------------------------------
-def mask2weight(crmap):
-    
-    if not os.path.isfile(crmap):
-        print(f'No Bad Pixel Mask Exist: {crmap}.')
-        return None
-
-    mask_hdul = fits.open(crmap)
-    mask_data = mask_hdul[0].data
-
-    # Invert the mask values: 0 becomes 1 and 1 becomes 0
-    mask_data[mask_data != 0] = 1
-    weight_data = 1 - mask_data
-
-    # Save the new data to a FITS file
-    weight_hdul = fits.PrimaryHDU(weight_data)
-    msuffix     = crmap.split('.')[-2]
-    weight_name = crmap.replace(f'.{msuffix}.','.weight.')
-    weight_hdul.writeto(weight_name, overwrite=True)
-
-    # Close the original weight file to free resources
-    mask_hdul.close()
-    os.chmod(weight_name, 0o777)
-
-    return weight_name
-#------------------------------------------------------------
-def sexcom(inim, conf_sex, conf_param, conf_conv, conf_nnw, det_thres, detectiondual=None):
-    outcat = inim.replace('fits', 'cat')
-    if detectiondual == None:
-        sexcom = f'sex {inim} -c {conf_sex} -CATALOG_NAME {outcat} -PARAMETERS_NAME {conf_param} -FILTER_NAME {conf_conv} -STARNNW_NAME {conf_nnw} -DETECT_THRESH {det_thres}'
-    else:
-        sexcom = f'sex {detectiondual},{inim} -c {conf_sex} -CATALOG_NAME {outcat} -PARAMETERS_NAME {conf_param} -FILTER_NAME {conf_conv} -STARNNW_NAME {conf_nnw} -DETECT_THRESH {det_thres}'
-
-    return sexcom
-#------------------------------------------------------------
-def generate_snapshot(trtbl, i, cutsize=2.0, pixscale=0.4, outdir=None):
-    """
-    Generate postage stamp cutouts for transient candidates.
-
-    Parameters:
-        trtbl (Table): Table containing transient data and metadata.
-        i (int): Index of the transient candidate in the table.
-        cutsize (float): Size of the cutout in arcminutes (default: 2.0).
-        pixscale (float): Pixel scale in arcseconds/pixel (default: 0.4).
-        outdir (str, optional): Directory to save the cutout. If None, saves in the same directory as the input.
-
-    Returns:
-        None
-    """
-    from pathlib import Path
-    from astropy.wcs import WCS
-    from astropy.nddata import Cutout2D
-
-    # Validate inputs
-    if not isinstance(trtbl, Table):
-        raise ValueError("trtbl must be an Astropy Table.")
-    if not isinstance(i, int) or i < 0 or i >= len(trtbl):
-        raise ValueError(f"Invalid index {i}. It must be within the range of trtbl rows.")
-
-    # Setup output directory
-    if outdir is None:
-        outdir = Path.cwd()
-    else:
-        outdir = Path(outdir)
-        outdir.mkdir(parents=True, exist_ok=True)
-
-    # Data extraction
-    n = trtbl['NUMBER'][i].item()
-    inim, hcim, hdim = trtbl['inim'][i], trtbl['hcim'][i], trtbl['hdim'][i]
-    tra, tdec = trtbl['ALPHA_J2000'][i].item(), trtbl['DELTA_J2000'][i].item()
-    ximg, yimg = trtbl['X_IMAGE'][i].item(), trtbl['Y_IMAGE'][i].item()
-    position = SkyCoord(ra=tra, dec=tdec, frame='icrs', unit='deg')
-    size = u.Quantity((cutsize, cutsize), u.arcmin)
-
-    # Loop over images
-    for image, kind in zip([inim, hcim, hdim], ['new', 'ref', 'sub']):
-        hdu = fits.open(image)[0]
-        wcs = WCS(hdu.header)
-
-        # Create cutout
-        cutout = Cutout2D(hdu.data, position=position, size=size, wcs=wcs, mode='partial', fill_value=0)
-        hdu.data = cutout.data
-        hdu.header.update(cutout.wcs.to_header())
-
-        # Update headers with metadata
-        metadata = {
-            'TRANRA': (tra, "transient candidate center RA"),
-            'TRANDEC': (tdec, "transient candidate center DEC"),
-            'XIMAGE': (ximg, "transient candidate X pixel location"),
-            'YIMAGE': (yimg, "transient candidate Y pixel location"),
-            'TRIM': (inim.split('.')[-2], "trimmed section"),
-            'MAGAUTO': (trtbl['MAG_AUTO'][i], "transient candidate MAG_AUTO"),
-            'SNR': (trtbl['SNR_WIN'][i], "transient candidate SNR"),
-            'SEEING': (trtbl['FWHM_IMAGE'][i] * pixscale, "transient candidate FWHM"),
-            'ELLIP': (trtbl['ELLIPTICITY'][i], "transient candidate ellipticity"),
-            'ELONG': (trtbl['ELONGATION'][i], "transient candidate elongation"),
-            'CLSSTAR': (trtbl['CLASS_STAR'][i], "transient candidate CLASS_STAR"),
-            'ASTEROID': (trtbl['flag_0'][i], "moving object matched within 5arcsec"),
-            'IMAFLAG': (trtbl['IMAFLAGS_ISO'][i], "Mask image flags"),
-        }
-
-        for key, value in metadata.items():
-            hdu.header[key] = value
-
-        # Write to output
-        outim = outdir / f"{Path(hdim).stem}.{n:06d}.{kind}{Path(hdim).suffix}"
-        try:
-            hdu.writeto(outim, overwrite=True)
-        except Exception as e:
-            print(f"Error writing file {outim}: {e}")
-#------------------------------------------------------------
-def rename_convention(inim, prefix='Calib'):
-    hdr = fits.getheader(inim)
-    """
-    Special name for splited KMTNet images
-    """
-    try:
-        observat    = hdr['OBSERV0']
-    except:
-        observat    = hdr['OBSERVAT']
-    obs         = f'KMTNet_{observat}'
-    obj         = hdr['OBJECT']
-    exptime     = hdr['EXPTIME']
-    filte       = hdr['FILTER']
-    try:
-        dateobs     = hdr['DATE-OBS'].replace('-', '').replace(':', '').replace('T', '-')
-    except:
-        dateobs     = hdr['DATE'].replace('-', '').replace(':', '').replace('T', '-') # processed date
-    #       New name
-    newim = f"{os.path.dirname(inim)}/{prefix}.{obs}.{obj}.{dateobs}.{filte}.{exptime:g}.stack.fits"
-    return newim
-#------------------------------------------------------------
-def safe_load_fits(filename, shape=None):
-    if os.path.exists(filename):
-        # Return the data if file exists
-        return fits.getdata(filename).astype(int)
-    else:
-        # Return an array of zeros if file is missing
-        # Use the provided shape, if available; otherwise, default to a shape
-        if shape is not None:
-            return np.zeros(shape, dtype=int)
-        else:
-            # Handle the case where shape is not known (for the first file)
-            raise FileNotFoundError(f"File {filename} not found and no shape provided for fallback.")
-#------------------------------------------------------------
-def find_longest_exposure_image(pattern):
-    """
-    Finds the image file with the longest exposure time based on the filename pattern.
-    
-    Args:
-    - pattern (str): The glob pattern used to match the files.
-    
-    Returns:
-    - str: The filename of the image with the longest exposure time, or 'None' if no images are found.
-    """
-    # Use glob to find files matching the pattern
-    files = [f for f in sorted(glob.glob(pattern)) if "mask" not in f and "crmap" not in f]
-    
-    # Try to find the file with the longest exposure time
-    try:
-        return max(files, key=lambda f: int(re.search(r'\d+(?=sec)', f).group()))
-    except ValueError:
-        # Return None if no files are found or if there's an issue parsing the exposure time
-        return None
-#------------------------------------------------------------
-def read_header(filename):
-    """
-    Reads a .head file and extracts key-value pairs from it.
-    
-    Args:
-        filename (str): Path to the .head file.
-        
-    Returns:
-        dict: A dictionary containing key-value pairs from the header file.
-    """
-    header_dict = {}
-
-    # Open the .head file and read it line by line
-    with open(filename, 'r') as header_file:
-        for line in header_file:
-            # Check if the line contains a key-value pair
-            if '=' in line:
-                # Split the line at the '=' sign to separate the key and value
-                key, value_comment = line.split('=', 1)
-                key = key.strip()  # Clean up any extra spaces
-                
-                # Separate the value from the comment, if present
-                if '/' in value_comment:
-                    value, comment = value_comment.split('/', 1)
-                    value = value.strip()  # Clean up value
-                    comment = comment.strip()  # Clean up comment
-                else:
-                    value = value_comment.strip()
-                    comment = None
-
-                # Store the key-value pair in the dictionary
-                header_dict[key] = value
-
-    return header_dict
-#------------------------------------------------------------
-def parse_region_bounds(region_str):
-    """
-    Parse region bounds from the header and adjust for Python 0-indexing.
-    """
-    bounds = region_str.replace('[', '').replace(']', '').split(',')
-    x_start, x_end = map(lambda x: int(x) - 1, bounds[0].split(':'))
-    y_start, y_end = map(lambda x: int(x) - 1, bounds[1].split(':'))
-    return x_start, x_end, y_start, y_end
-#------------------------------------------------------------
-def mosaic_image(data_i, data_t, header_i, header_t, div_col, div_row):
-    """
-    Mosaic two images based on chi2 values and header information.
-    """
-    combined_image = np.zeros_like(data_i)
-    for region in range(div_col * div_row):
-        # Extract chi2 values and region bounds
-        try:
-            x2nrm_i = float(header_i[f'X2NRM{region:02d}'])
-            x2nrm_t = float(header_t[f'X2NRM{region:02d}'])
-            region_bounds = header_i[f'REGION{region:02d}']
-        except KeyError as e:
-            raise ValueError(f"Missing required header keyword: {e}")
-        
-        x_start, x_end, y_start, y_end = parse_region_bounds(region_bounds)
-        
-        # Select the better region based on chi2
-        if x2nrm_i < x2nrm_t:
-            print(f'Region {region}: chi2_i = {x2nrm_i}, chi2_t = {x2nrm_t}, selecting science image.')
-            combined_image[y_start:y_end, x_start:x_end] = data_i[y_start:y_end, x_start:x_end]
-            header_i[f'CONVD{region:02d}'] = 'i'
-        else:
-            print(f'Region {region}: chi2_i = {x2nrm_i}, chi2_t = {x2nrm_t}, selecting template image.')
-            combined_image[y_start:y_end, x_start:x_end] = data_t[y_start:y_end, x_start:x_end]
-            header_i[f'CONVD{region:02d}'] = 't'
-            # Update header information from the template image
-            for key in ['X2NRM', 'KSUM', 'CONVOL', 'SSSIG', 'SSSCAT', 'FSIG', 'FSCAT', 'NX2NRM']:
-                header_i[f'{key}{region:02d}'] = header_t.get(f'{key}{region:02d}', None)
-    return combined_image
-#------------------------------------------------------------
-def combine_subtracted_images(
-    header_i_path, header_t_path, 
-    conv2i_path, conv2t_path, 
-    template_i_path, template_t_path, 
-    output_path, template_output_path, 
-    div_col=4, div_row=4
-):
-    """
-    Combine subtracted and template images into mosaics based on chi2 values.
-    """
-    # Open the headers
-    with fits.open(header_i_path) as hdul_header_i, fits.open(header_t_path) as hdul_header_t:
-        header_i = hdul_header_i[0].header.copy()
-        header_t = hdul_header_t[0].header
-
-    # Open the subtracted images
-    with fits.open(conv2i_path) as hdul_conv2i, fits.open(conv2t_path) as hdul_conv2t:
-        image_data_i = hdul_conv2i[0].data
-        image_data_t = hdul_conv2t[0].data
-
-    # Validate image shapes
-    if image_data_i.shape != image_data_t.shape:
-        raise ValueError("Input subtracted images must have the same dimensions.")
-
-    # Open the template images
-    with fits.open(template_i_path) as hdul_templ_i, fits.open(template_t_path) as hdul_templ_t:
-        template_data_i = hdul_templ_i[0].data
-        template_data_t = hdul_templ_t[0].data
-
-    # Validate template shapes
-    if template_data_i.shape != template_data_t.shape:
-        raise ValueError("Input template images must have the same dimensions.")
-
-    # Mosaic the subtracted and template images
-    print("Mosaicing subtracted images...")
-    combined_image = mosaic_image(image_data_i, image_data_t, header_i, header_t, div_col, div_row)
-    
-    print("Mosaicing template images...")
-    combined_template = mosaic_image(template_data_i, template_data_t, header_i, header_t, div_col, div_row)
-
-    # Save the combined images
-    fits.writeto(output_path, combined_image, header=header_i, overwrite=True)
-    fits.writeto(template_output_path, combined_template, header=header_i, overwrite=True)
-
-    print(f"Combined subtracted image saved to {output_path}")
-    print(f"Combined template image saved to {template_output_path}")
-#------------------------------------------------------------
+from astropy.wcs import FITSFixedWarning
+warnings.simplefilter('ignore', category=FITSFixedWarning)
+#%% Import utility functions
+from KMTNet_util_functions import (
+    rss, apass_query, GAIAXP_query, sort_BVRI, limitmag, 
+    matching, star4zp, zpcal, add_colorbar, date2MJD, 
+    MJD2date, create_ldac_fits, hotpants, invert_image, 
+    mask2weight, generate_snapshot, rename_convention, 
+    safe_load_fits, find_longest_exposure_image, read_header,
+    parse_region_bounds, mosaic_image, combine_subtracted_images,
+    calculate_crosstalk_positions, build_sex_command
+)
 #%% ToOAmplifierCombine.py
 def ampcom(path_data, path_cfg):
     
@@ -699,7 +163,7 @@ def ampcom(path_data, path_cfg):
             conv        = os.path.join(path_cfg, 'kmtnet.conv')
             nnw         = os.path.join(path_cfg, 'kmtnet.nnw')
     
-            os.system(f'sex {path_data}{serial}.{chip}.fits -c {cfg} -CATALOG_TYPE ASCII_HEAD -CATALOG_NAME {catname} -PARAMETERS_NAME {param} -FILTER_NAME {conv} -STARNNW_NAME {nnw} -DETECT_THRESH 50 -ANALYSIS_THRESH 50')
+            os.system(f'source-extractor {path_data}{serial}.{chip}.fits -c {cfg} -CATALOG_TYPE ASCII_HEAD -CATALOG_NAME {catname} -PARAMETERS_NAME {param} -FILTER_NAME {conv} -STARNNW_NAME {nnw} -DETECT_THRESH 50 -ANALYSIS_THRESH 50')
                       
             cat = Table.read(f'{path_data}{serial}.{chip}.ampcom.cat', format ='ascii')
             magauto = np.array(cat['MAG_AUTO'])
@@ -769,14 +233,13 @@ def ampcom(path_data, path_cfg):
 #%% ToOAstrometry.py
 def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet_grid.fits'):
     """
-    date = '220328_DWF'
-    path_data = f'/data4/kmtntoo/tutorial/data/raw/{date}/'
-    path_cfg = '/data4/kmtntoo/tutorial/config/'
-    path_cat = '/data4/kmtntoo/tutorial/catalog/'
+    date = '250831_SAAO'
+    path_data = f'/data8/kmtntoo/data/raw/{date}/'
+    path_cfg = '/data8/kmtntoo/config/'
+    path_cat = '/data8/kmtntoo/catalog/'
     radius = 1.0
     ithresh = 10
     gridcat='kmtnet_grid.fits'
-    gridcat='ToO_grid.cat'
     """
 
     import os
@@ -877,7 +340,7 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
 
             while 1:
 
-                sexcom  = f'sex {path_data}{serial}.{chip}.fits -c {cfg} -CATALOG_NAME {catname} -PARAMETERS_NAME {param} -FILTER_NAME {conv} -STARNNW_NAME {nnw} -CATALOG_TYPE FITS_LDAC -HEADER_SUFFIX NONE -DETECT_THRESH {thresh} -ANALYSIS_THRESH {thresh} -SATUR_LEVEL 60000.0'
+                sexcom  = f'source-extractor {path_data}{serial}.{chip}.fits -c {cfg} -CATALOG_NAME {catname} -PARAMETERS_NAME {param} -FILTER_NAME {conv} -STARNNW_NAME {nnw} -CATALOG_TYPE FITS_LDAC -HEADER_SUFFIX NONE -DETECT_THRESH {thresh} -ANALYSIS_THRESH {thresh} -SATUR_LEVEL 60000.0'
                 
                 if name[i][3] == 'a': ahead = f'{path_cfg}ahead/kmtnet_global_sso.{chip}.ahead' #Austrailia
                 if name[i][3] == 's': ahead = f'{path_cfg}ahead/kmtnet_global.{chip}.ahead' #South Africa
@@ -894,7 +357,11 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
                 # load the reference catalog (GAIA)
                 
                 gaiacat = os.path.join(path_cat, 'gaiaxp', f'gaiaxp_{str(trgt_field["field_name1"]).zfill(4)}.fits')
-                if os.path.exists(gaiacat) and centcoord.separation(kmtcoord).min().value < 1.0: # center matched with the grid in 0.1 deg
+                if os.path.exists(gaiacat) and centcoord.separation(kmtcoord).min().value < 0:
+                    """
+                    TODO: Now in fix. Gaia catalog is not used.
+                    Instead, we use the UCAC-4 catalog.
+                    """
                     gaialdac     = gaiacat.replace(".fits", "_ldac.fits")
                     if not os.path.exists(gaialdac):
                         create_ldac_fits(gaiacat, gaialdac, center=centcoord, radius=radius)
@@ -965,15 +432,15 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
 #%% ToOAstrometryQA.py
 def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, crreject=True, bleedreject=True, weightmap=True, imtype='chip') :
     """
-    QATEST ver 1.3.2
+    QATEST ver 1.4.0
 
     # Input Format : 
-    os.chdir(f'/data4/kmtntoo/tutorial/pipe/')
+    os.chdir(f'/data8/kmtntoo/pipe/')
     
-    fname       = '/data4/kmtntoo/tutorial/data/raw/250211_CTIO/062592.nn.fits'
-    configdir   = '/data4/kmtntoo/tutorial/config/'
+    fname       = '/data8/kmtntoo/data/raw/20250212_CTIO/062889.nn.fits'
+    configdir   = '/data8/kmtntoo/config/'
     gridcat     = 'kmtnet_grid.fits'
-    refcatdir   = '/data4/kmtntoo/tutorial/catalog/'
+    refcatdir   = '/data8/kmtntoo/catalog/'
     refcatname  = 'gaiaxp'
     divnum      = 8
     crreject    = True
@@ -981,10 +448,10 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
     weightmap   = True
     imtype      = 'chip'
 
-    fname       = '/data4/kmtntoo/tutorial/data/stack/240916_SAAO/S240915b_2025.108-48.R.20240916.SAAO.960sec.stack.fits'
-    configdir   = '/data4/kmtntoo/tutorial/config/'
+    fname       = '/data8/kmtntoo/data/stack/250831_SAAO/TOO_0578_0578.316-78.I.20250831.SAAO.480sec.stack.fits'
+    configdir   = '/data8/kmtntoo/config/'
     gridcat     = 'kmtnet_grid.fits'
-    refcatdir   = '/data4/kmtntoo/tutorial/catalog/'
+    refcatdir   = '/data8/kmtntoo/catalog/'
     refcatname  = 'gaiaxp'
     divnum      = 8
     crreject    = False
@@ -1017,7 +484,13 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
     import warnings
     import numpy as np
     import pandas as pd
-    import astroscrappy as cr
+    try:
+        import astroscrappy as cr
+    except ImportError:
+        raise ImportError(
+            "astroscrappy package is required for cosmic ray rejection. "
+            "Install it with: pip install astroscrappy"
+        )
     import astropy.units as u
     from datetime import date as dt
     from astropy.table import Table
@@ -1223,7 +696,7 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
             verbose = True
         )
 
-        # Cross-talk masking
+        # Crosstalk masking
         saturation_limit = 56000
         mask    = np.where(data > saturation_limit, 1, 0)
         bound   = np.arange(0, int(hdr['NAXIS1'])+1, int(hdr['NAXIS1']/8))
@@ -1386,13 +859,13 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
                 checkname   = fname.replace(".fits", ".bkgrms")
             prompt_chk = f'-CHECKIMAGE_TYPE {checktype} -CHECKIMAGE_NAME {checkname}'
         # weight image
-        if weightphot:
-            weightname = mask2weight(flagname)
+        weightname = mask2weight(flagname)
+        if weightphot and weightname is not None:
             prompt_wgt = f' -WEIGHT_TYPE MAP_WEIGHT -WEIGHT_IMAGE {weightname} -RESCALE_WEIGHTS Y -WEIGHT_GAIN Y'
         else:
             prompt_wgt = ''
 
-        prompt  = f'sex {fname} {prompt_cfg} {prompt_cat} {prompt_opt} {prompt_flg} {prompt_chk} {prompt_wgt}'
+        prompt  = f'source-extractor {fname} {prompt_cfg} {prompt_cat} {prompt_opt} {prompt_flg} {prompt_chk} {prompt_wgt}'
         os.system(prompt)
         if weightphot and os.path.exists(weightname):
             os.remove(weightname)
@@ -1519,13 +992,13 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
                     step(mref['XWIN_IMAGE'], 
                          mref['YWIN_IMAGE']
                         )
-                ]['sep']
+                ]['sep']*3600
                 sep = mrefcut[
                     step(
                         mrefcut['XWIN_IMAGE'], 
                         mrefcut['YWIN_IMAGE']
                     )
-                ]['sep']
+                ]['sep']*3600
 
                 if len(sep0) == 0 : #if no objects are detected
                     dtctRatio = 1
@@ -1540,12 +1013,12 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
                         sect_astrom = 'bad'
                     else : 
                         dtctRatio = len(sep)/len(sep0)
-                        rmsalign  = sqrt(mean((sep)**2))
+                        rmsalign  = sqrt(mean((sigma_clip(sep, sigma=3))**2))
+                        # rmsalign  = sqrt(mean((sep)**2))
                         alignstd  = std(sep)
                         sect_astrom = ('good' if (dtctRatio > 0.6 and 
                                                   rmsalign < 0.5) 
                                        else 'bad')
-
                 df_sect.loc[8*j + i] = [len(sep), 
                                         rmsalign, 
                                         alignstd, 
@@ -1556,7 +1029,7 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
         gbmap_row = list(df_sect['astrometry'])
         bad_sect = [i for i, x in enumerate(gbmap_row) if x == 'bad']
         empty_sect = [i for i, x in enumerate(gbmap_row) if x == 'empty']
-        fastrom = 'good' if (gbmap_row.count('bad') <= 2) and (gbmap_row.count('empty') <= 10) and (sqrt(mean(csep**2)) < 0.4) else 'bad'
+        fastrom = 'good' if (gbmap_row.count('bad') <= 2) and (gbmap_row.count('empty') <= 10) and (median(csep) < 0.4) else 'bad'
         badamp_ls = [[j+i*8 for i in range(8)] for j in range(8)]
         badamp_bl = True if empty_sect in badamp_ls else False
         result = [fname, fastrom, bad_sect]
@@ -1849,11 +1322,11 @@ def zpscale(img, path_output, path_cfg, path_cat, path_plot, mode='1DLINEAR', ma
         The scaling process is basically done amp by amp. This is because the zp is discrete for each amp at least slightly.
     Args:
         date        = '220328_DWF'
-        img         = f'/data4/kmtntoo/tutorial/data/raw/{date}/057488.kk.fits'
-        path_output = f'/data4/kmtntoo/tutorial/data/scaled/{date}/'
-        path_cfg    = '/data4/kmtntoo/tutorial/config/'
-        path_cat    = '/data4/kmtntoo/tutorial/catalog/'
-        path_plot   = '/data4/kmtntoo/tutorial/result/plot/'
+        img         = f'/data8/kmtntoo/data/raw/{date}/057488.kk.fits'
+        path_output = f'/data8/kmtntoo/data/scaled/{date}/'
+        path_cfg    = '/data8/kmtntoo/config/'
+        path_cat    = '/data8/kmtntoo/catalog/'
+        path_plot   = '/data8/kmtntoo/result/plot/'
         mode        = '1DLINEAR'
         # mode        = '2DPOLYNOMIAL'
         magkey      = 'AUTO'
@@ -1882,8 +1355,9 @@ def zpscale(img, path_output, path_cfg, path_cat, path_plot, mode='1DLINEAR', ma
     import matplotlib.pyplot as plt
     from scipy.optimize import curve_fit
     from astropy.coordinates import SkyCoord
+    from astropy.modeling import models, fitting
     from sklearn.linear_model import HuberRegressor
-
+    
     # 0. Mode checker
     mode = mode.upper()
     if mode not in ['1DLINEAR', '2DPOLYNOMIAL']:
@@ -1993,7 +1467,7 @@ def zpscale(img, path_output, path_cfg, path_cat, path_plot, mode='1DLINEAR', ma
         prompt_wgt  = f' -WEIGHT_TYPE MAP_WEIGHT -WEIGHT_IMAGE {img.replace(".fits", ".weight.fits")} -RESCALE_WEIGHTS Y -WEIGHT_GAIN Y'
     else:
         prompt_wgt = ''
-    prompt      = 'sex '+inim_single+prompt_cfg+prompt_aper+prompt_opt+prompt_cat+prompt_chk+prompt_flg+prompt_bkg+prompt_wgt
+    prompt      = 'source-extractor '+inim_single+prompt_cfg+prompt_aper+prompt_opt+prompt_cat+prompt_chk+prompt_flg+prompt_bkg+prompt_wgt
     if os.path.exists(img.replace(".fits", ".astromqa.cat")) and os.path.exists(mbkgname):
         shutil.move(img.replace(".fits", ".astromqa.cat"), catname)
     else:
@@ -2246,8 +1720,8 @@ def zpscale(img, path_output, path_cfg, path_cat, path_plot, mode='1DLINEAR', ma
 #%% ToOBadPixelMask.py
 def BPM_update(img, path_cfg):
     """
-    img = '/data4/kmtntoo/tutorial/data/scaled/240423_CTIO/S240422ed_0749.121-30.R.20240423.CTIO.052188.kk.scaled.fits'
-    path_cfg = '/data4/kmtntoo/tutorial/config/'
+    img = '/data8/kmtntoo/data/scaled/240423_CTIO/S240422ed_0749.121-30.R.20240423.CTIO.052188.kk.scaled.fits'
+    path_cfg = '/data8/kmtntoo/config/'
     """
     
     import os
@@ -2328,10 +1802,10 @@ def stacking(filename_convention, path_input, path_output, path_cfg, path_ref, c
     date     = '240915_CTIO'
     filename_convention = r"(?P<field>.*?_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<band>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<serial>\d{6})\.(?P<chip>\w+)\.(?P<type>scaled|mask)\.fits"
 
-    path_input  = f'/data4/kmtntoo/tutorial/data/scaled/{date}/'
-    path_output = f'/data4/kmtntoo/tutorial/data/stack/{date}/'
-    path_cfg    = '/data4/kmtntoo/tutorial/config/'
-    path_ref    = '/data4/kmtntoo/tutorial/data/template/'
+    path_input  = f'/data8/kmtntoo/data/scaled/{date}/'
+    path_output = f'/data8/kmtntoo/data/stack/{date}/'
+    path_cfg    = '/data8/kmtntoo/config/'
+    path_ref    = '/data8/kmtntoo/data/template/'
     start       = time.time()
     combinetype = 'MEDIAN'
     gridcat     = 'kmtnet_grid.cat'
@@ -2527,9 +2001,9 @@ def catalogmaker(cat, path_output, path_cat, flagcut=0, pixscale=0.4, clsstar=0.
     cat = r"(?P<field>\w+_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<filter>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<exptime>\d+sec)\.(?P<type>stack)\.fits\.cat"
     
     date        = '231107_CTIO'
-    cat = f'/data4/kmtntoo/tutorial/data/stack/{date}/G331903-12-1_9012.020-31.R.20231108.CTIO.600sec.stack.fits.cat'
-    path_output = f'/data4/kmtntoo/tutorial/data/stack/{date}/'
-    path_cat    = f'/data4/kmtntoo/tutorial/catalog/'
+    cat = f'/data8/kmtntoo/data/stack/{date}/G331903-12-1_9012.020-31.R.20231108.CTIO.600sec.stack.fits.cat'
+    path_output = f'/data8/kmtntoo/data/stack/{date}/'
+    path_cat    = f'/data8/kmtntoo/catalog/'
     flagcut     = 0
     pixscale    = 0.4
     clsstar     = 0.8
@@ -2627,8 +2101,8 @@ def catalogmaker(cat, path_output, path_cat, flagcut=0, pixscale=0.4, clsstar=0.
                                 flagcut=flagcut)
 
         param_zpcal     = dict(intbl=star4zp(**param_st4zp),
-                                inmagkey=inmagkey, inmagerkey=inmagerkey,
-                                refmagkey=refmagkey, refmagerkey=refmagerkey,
+                                inmagkey=inmagkey,
+                                refmagkey=refmagkey,
                                 sigma=2.0)
 
         zp, zper, otbl, xtbl = zpcal(**param_zpcal)
@@ -2758,14 +2232,14 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
     sciimg = r"(?P<field>\w+_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<filter>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<exptime>\d+sec)\.(?P<type>stack)\.fits"
 
     Args:
-    date        = '190816_SSO'
-    simg        = 'G331903-10-2_9028.021-31.R.20190815.SSO.480sec.stack.fits'
-    sciimg      = f'/data4/kmtntoo/tutorial/data/stack/{date}/{simg}'
-    path_ref    = '/data4/kmtntoo/tutorial/data/template/'
-    path_cat    = f'/data4/kmtntoo/tutorial/data/stack/{date}/'
-    path_refcat = '/data4/kmtntoo/tutorial/data/template/'
-    path_output = f'/data4/kmtntoo/tutorial/data/subt/{date}/'
-    path_config = '/data4/kmtntoo/tutorial/config/'
+    date        = '250831_SAAO'
+    simg        = 'TOO_0578_0578.316-78.I.20250831.SAAO.480sec.stack.fits'
+    sciimg      = f'/data8/kmtntoo/data/stack/{date}/{simg}'
+    path_ref    = '/data8/KS4/database/stack/'
+    path_cat    = f'/data8/kmtntoo/data/stack/{date}/'
+    path_refcat = '/data8/KS4/database/stack/'
+    path_output = f'/data8/kmtntoo/data/subt/{date}/'
+    path_config = '/data8/kmtntoo/config/'
     div_col     = 4
     div_row     = 4
     pixscale    = 0.4
@@ -2783,6 +2257,7 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
     import astropy.units as u
     from astropy.wcs import WCS
     from itertools import repeat
+    from functools import partial
     from astropy.time import Time
     from astropy.table import Table
     from astropy.io import fits, ascii
@@ -2806,12 +2281,26 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
         print(f"Science image: \n{os.path.basename(sciimg)}")
 
     # reference image
-    pattern_ks4 = os.path.join(path_ref, f'{field}.{radec}', f'ks4*{band}*.scaled.stack.fits')
+    pattern_ks4 = os.path.join(path_ref, f'{field}.{radec}', f'ks4*{band}*.stack.fits')
     refimg = find_longest_exposure_image(pattern_ks4)
 
-    if refimg is None:
-        pattern_ps1 = os.path.join(path_ref, f'{field}.{radec}', f'ps1*{band}*.scaled.stack.fits')
+    if refimg is None and int(radec[-3:]) >= -30: 
+        # PS1 reference image is available for above declination -30
+        pattern_ps1 = os.path.join(path_ref, f'{field}.{radec}', f'ps1*{band}*.stack.fits')
         refimg = find_longest_exposure_image(pattern_ps1)
+        if refimg is None:
+            try:
+                from KMTNet_REF_functions import generate_panstarrs_reference
+                refimg = generate_panstarrs_reference(
+                    field=f"{field}.{radec}",
+                    cra=fits.getheader(sciimg)['CENTRA'],
+                    cdec=fits.getheader(sciimg)['CENTDEC'],
+                    path_output=os.path.join(path_ref, f"{field}.{radec}"),
+                    path_cfg=path_config,
+                    filte=band
+                )
+            except:
+                print(f"Failed to generate Pan-STARRS reference image for {field}.{radec} {band}-band")
         
     if refimg:
         print(f"Reference image: \n{os.path.basename(refimg)}")
@@ -2863,10 +2352,10 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
         stamp   = copy.deepcopy(scicat)
         try: 
             stamp   = stamp[stamp['SNR_WIN']>20] 
+            if len(stamp)<200: stamp = None
         except KeyError: 
             stamp_sorted = stamp[np.argsort(stamp['MAGERR_AUTO'])]
             stamp = stamp_sorted[:5000]
-        if len(stamp)<200: stamp = None
 
     # sci HDU
     scihdu = fits.open(sciimg)[0]
@@ -2943,31 +2432,25 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
     conf_param  = os.path.join(path_config, 'kmtnet_imask.param')
     conf_nnw    = os.path.join(path_config, 'kmtnet.nnw')
     conf_conv   = os.path.join(path_config, 'kmtnet.conv')
-    try:
-        fwhmcom     = f' -SEEING_FWHM {fits.getheader(SCIIMG)["FWHM"]}'
-    except:
-        fwhmcom     = ''
-    maskcom     = f' -FLAG_IMAGE {MASKIMG} -FLAG_TYPE MAX'
-    #    Photometry on the subtracted image & inverted subt image
+    
     WEIGHTIMG   = mask2weight(MASKIMG)
-    weightcom   = f' -WEIGHT_TYPE MAP_WEIGHT -WEIGHT_IMAGE {WEIGHTIMG} -RESCALE_WEIGHTS Y -WEIGHT_GAIN Y'
-    os.system(sexcom(SUBTIMG, conf_sex, conf_param, conf_conv, conf_nnw, det_thres=detect)+maskcom+fwhmcom+weightcom)#, detectiondual=trim_SCIIMG))
+
     if psf_analysis==True:
-        conf_param  = os.path.join(path_config, 'kmtnet.param')
-        os.system(sexcom(SCIIMG, conf_sex, conf_param, conf_conv, conf_nnw, det_thres=20)+maskcom+fwhmcom+' -CATALOG_TYPE FITS_LDAC')
+        os.system(build_sex_command(
+            SUBTIMG, conf_sex, os.path.join(path_config, 'kmtnet.param'), conf_conv, conf_nnw, detect=20, fwhm=fits.getheader(SCIIMG).get("FWHM"), mask=MASKIMG, weight=WEIGHTIMG, extra_args={"CATALOG_TYPE": "FITS_LDAC"}))
         if os.path.isfile(SCIIMG.replace('.fits', '.cat')):
             os.system(f'psfex {SCIIMG.replace(".fits", ".cat")} -c {path_config}kmtnet.psfex')
-            conf_param  = os.path.join(path_config, 'kmtnet_psf.param')
-            os.system(sexcom(SUBTIMG, conf_sex, conf_param, conf_conv, conf_nnw, det_thres=detect)+maskcom+fwhmcom+weightcom+f' -PSF_NAME {SCIIMG.replace(".fits", ".psf")}')
+            os.system(build_sex_command(
+                SUBTIMG, conf_sex, {os.path.join(path_config, "kmtnet_psf.param")}, conf_conv, conf_nnw, detect, fwhm=fits.getheader(SCIIMG).get("FWHM"), mask=MASKIMG, weight=WEIGHTIMG, extra_args={"PSF_NAME": SCIIMG.replace(".fits", ".psf")}
+            ))
             subtbl      = ascii.read(SUBTIMG.replace(".fits", ".psf.cat"))
     else:
-        os.system(sexcom(SUBTIMG, conf_sex, conf_param, conf_conv, conf_nnw, det_thres=detect)+maskcom+fwhmcom+weightcom)
+        os.system(build_sex_command(SUBTIMG, conf_sex, conf_param, conf_conv, conf_nnw, detect, fwhm=fits.getheader(SCIIMG).get("FWHM"), mask=MASKIMG, weight=WEIGHTIMG))
         subtbl      = ascii.read(SUBTIMG.replace(".fits", ".cat"))
     INV_SUBTIMG = SUBTIMG.replace("hd", "invhd")
     invert_image(inim=SUBTIMG, outim=INV_SUBTIMG)
-    os.system(sexcom(INV_SUBTIMG, conf_sex, conf_param, conf_conv, conf_nnw, det_thres=detect)+maskcom+fwhmcom+weightcom)
+    os.system(build_sex_command(INV_SUBTIMG, conf_sex, conf_param, conf_conv, conf_nnw, detect, fwhm=fits.getheader(SCIIMG).get("FWHM"), mask=MASKIMG, weight=WEIGHTIMG))
     invsubtbl   = ascii.read(INV_SUBTIMG.replace(".fits", ".cat"))
-
 
     print(f"# Number of sources: {len(subtbl)}")
     subtbl['inim']  = SCIIMG
@@ -3042,12 +2525,11 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
         c_invhd = SkyCoord(invsubtbl['ALPHA_J2000'], invsubtbl['DELTA_J2000'], unit=u.deg)
         #    Matching with inverted images
         indx_invhd, sep_invhd, _ = c_sub.match_to_catalog_sky(c_invhd)
-        subtbl['flag_1'][(sep_invhd.arcsec<subtbl['FWHM_IMAGE']) & (np.abs((subtbl['MAG_AUTO'] - invsubtbl[indx_invhd]['MAG_AUTO'])) <= 1)] = True
-        # subtbl['flag_1'][(sep_invhd.arcsec<subtbl['FWHM_IMAGE'])] = True
+        # subtbl['flag_1'][(sep_invhd.arcsec<subtbl['FWHM_IMAGE']) & (np.abs((subtbl['MAG_AUTO'] - invsubtbl[indx_invhd]['MAG_AUTO'])) <= 1)] = True
+        subtbl['flag_1'][(sep_invhd.arcsec<subtbl['FWHM_IMAGE'])] = True
     else:
         print('Inverted subtraction image has no source. ==> pass flag1')
         pass
-    
     #------------------------------------------------------------
     #    flag 2: Source Extractor Flag (Bad Pixel Masking) 
     #------------------------------------------------------------
@@ -3077,53 +2559,96 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
                     (subtbl['BACKGROUND']>np.median(subtbl['BACKGROUND'])+2*np.std(subtbl['BACKGROUND']))
                     ] = True
     #------------------------------------------------------------
-    #    flag 6: Too Low SNR
+    #    flag 6: Too Low SNR ==> ???
     #------------------------------------------------------------
     snrcut  = 5         # flag6
     subtbl['flag_6'][(subtbl['SNR_WIN']<snrcut)] = True
     #------------------------------------------------------------
-    #    flag 7
+    #    flag 7: Crosstalk Contamination
     #------------------------------------------------------------
-    data = fits.getdata(SUBTIMG)
-    peeing = subtbl.meta['SEEING']/pixscale
-    skyval = np.median(subtbl['BACKGROUND'])
-    skysig = np.std(subtbl['BACKGROUND'])
+    path_single = path_output.replace('subt', 'scaled')
+    subtbl['flag_7'] = False
 
-    subtbl['n_bad'] = 0
-    subtbl['ratio_bad'] = 0.0
-    subtbl['n_null'] = 0
-    
-    #    Fraction
-    f = 0.1
-    for i, (tx, ty, bkg) in enumerate(zip(subtbl['X_IMAGE'], subtbl['Y_IMAGE'], subtbl['BACKGROUND'])):
+    try:
+        fullcat = ascii.read(f'{path_cat}{os.path.basename(sciimg)}.zp.cat')
+        fullcat_coords = SkyCoord(ra=fullcat['ALPHA_J2000'], dec=fullcat['DELTA_J2000'], unit='deg')
+    except Exception as e:
+        print(f"Warning: Could not load or process fullcat for crosstalk check: {e}")
+        fullcat = None
 
-        #    Snapshot
-        tsize = peeing
-        y0, y1 = int(ty-tsize), int(ty+tsize)
-        x0, x1 = int(tx-tsize), int(tx+tsize)
-        cdata = data[y0:y1, x0:x1]
-        crt = bkg - skysig*25
-        cutline = cdata.size*f
-        nbad = len(cdata[cdata<crt])
-        try:
-            ratiobad = nbad/cdata.size
-        except:
-            ratiobad = -99.0
-        nnull = len(np.where(cdata == 1e-30)[0])
-        #    Dipole
-        if nbad > cutline or nnull != 0:
-            subtbl['flag_7'][i] = True
+    if fullcat is not None:
+        wcs_list = []
+        dither_files = []
+        num_dith = int(scihdr.get('NUMDITH', 0))
+        for l in range(num_dith):
+            for n, chip in enumerate(['kk', 'mm', 'tt', 'nn']):
+                single = os.path.join(path_single, scihdr.get(f'FILE{str(l*4+n+1).zfill(4)}'))
+                if os.path.isfile(single):
+                    dither_files.append(single)
+                    wcs_list.append(WCS(fits.getheader(single)))
 
-        subtbl['n_bad'][i] = nbad
-        subtbl['ratio_bad'][i] = ratiobad
-        subtbl['n_null'][i] = nnull
+        subtbl_coords = SkyCoord(ra=subtbl['ALPHA_J2000'].data, dec=subtbl['DELTA_J2000'].data, unit='deg')
+
+        all_xtalk_coords = []
+        for wcs in wcs_list:
+            x, y = wcs.wcs_world2pix(subtbl_coords.ra, subtbl_coords.dec, 0)
+            
+            # Create a mask for sources within the image boundaries
+            valid_mask = (x > 0) & (x < 9216) & (y > 0) & (y < 9232)
+            
+            if np.any(valid_mask):
+                valid_x = x[valid_mask]
+                valid_y = y[valid_mask]
+                
+                # Calculate crosstalk positions for valid sources
+                xtalk_positions_x = np.array([calculate_crosstalk_positions(px) for px in valid_x])
+                
+                # For each source, we have multiple crosstalk x positions, but the same y
+                num_xtalk_per_source = xtalk_positions_x.shape[1]
+                xtalk_y = np.repeat(valid_y, num_xtalk_per_source)
+                
+                # Convert all crosstalk pixel coordinates to world coordinates
+                xtalk_sky_coords = wcs.wcs_pix2world(xtalk_positions_x.flatten(), xtalk_y, 0)
+                
+                # Store xtalk coords with the original index of the source in subtbl
+                original_indices = np.where(valid_mask)[0]
+                repeated_indices = np.repeat(original_indices, num_xtalk_per_source)
+                
+                all_xtalk_coords.append(np.column_stack((xtalk_sky_coords[0], xtalk_sky_coords[1], repeated_indices)))
+
+        if all_xtalk_coords:
+            stacked_xtalk_coords = np.vstack(all_xtalk_coords)
+            xtalk_skycoord = SkyCoord(ra=stacked_xtalk_coords[:, 0], dec=stacked_xtalk_coords[:, 1], unit='deg')
+            
+            # Match all crosstalk positions to the full catalog at once
+            idx, d2d, _ = xtalk_skycoord.match_to_catalog_sky(fullcat_coords)
+
+            max_sep = 1.0 * u.arcsec
+            match_mask = d2d < max_sep
+            
+            # Filter for bright matches
+            bright_mask = fullcat['MAG_AUTO'][idx[match_mask]] < 15
+            
+            # Get the original indices of sources that have a bright crosstalk match
+            culprit_indices = stacked_xtalk_coords[match_mask][bright_mask][:, 2].astype(int)
+            
+            if len(culprit_indices) > 0:
+                print(f"Found {len(np.unique(culprit_indices))} sources with potential crosstalk contamination.")
+                # Flag the sources in subtbl
+                subtbl['flag_7'][np.unique(culprit_indices)] = True
+        else:
+            print("No valid sources found on individual images to check for crosstalk.")
 
     #------------------------------------------------------------
     #    flag 8: HOTPANTs Chi2 Value
     #------------------------------------------------------------
     subthdr     = fits.getheader(SUBTIMG)
+    hotpants_chi2 = []
     for i in range(div_col*div_row):
-        if float(subthdr[f'X2NRM{str(i).zfill(2)}']) > 1000:
+        hotpants_chi2.append(float(subthdr[f'X2NRM{str(i).zfill(2)}']))
+    hotpants_chi2_3sigma = np.median(hotpants_chi2) + 3*np.std(hotpants_chi2)
+    for i in range(div_col*div_row):
+        if hotpants_chi2[i] > hotpants_chi2_3sigma or hotpants_chi2[i] > 1000:
             badregion   = subthdr[f'REGION{str(i).zfill(2)}']
             parts = badregion.strip('[]').split(',')
             xmin, xmax = map(int, parts[0].split(':'))
@@ -3174,21 +2699,17 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
     # ------------------------------------------------------------
     #     Snapshot maker
     # ------------------------------------------------------------
-    
     print(f"#\tSnapshot maker ({len(trtbl)})")
     if len(trtbl) > 0:
+        rows = [trtbl[i] for i in range(len(trtbl))]
+        outdir = os.path.join(path_output, 'snap')
         if ncore == 1:
-            for i in range(len(trtbl)):
-                generate_snapshot(trtbl, i, cutsize, outdir=os.path.join(path_output, 'snap'))
+            for row in rows:
+                generate_snapshot(row, cutsize=cutsize, pixscale=pixscale, outdir=outdir)
         else:
-            # Multi-threading with multiprocessing
-            outdir = os.path.join(path_output, 'snap')
             with multiprocessing.Pool(processes=ncore) as pool:
-                # Pass all parameters to the function using zip
-                results = pool.starmap(
-                    generate_snapshot, 
-                    zip(repeat(trtbl), np.arange(len(trtbl)), repeat(cutsize), repeat(outdir))
-                )
+                func = partial(generate_snapshot, cutsize=cutsize, pixscale=pixscale, outdir=outdir)
+                results = pool.map(func, rows)
     else:
         print('No transient candidates.')
     print("All Done")

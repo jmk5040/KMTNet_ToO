@@ -10,20 +10,20 @@ MAG_AUTO                 #Kron-like elliptical aperture magnitude               
 MAGERR_AUTO              #RMS error for AUTO magnitude                              [mag]
 MAG_APER[4]              #Fixed aperture magnitude vector                           [mag]
 MAGERR_APER[4]           #RMS error vector for fixed aperture mag.                  [mag]
+#MAG_PETRO                #Petrosian-like elliptical aperture magnitude              [mag]
+#MAGERR_PETRO             #RMS error for PETROsian magnitude                         [mag]
 FLUX_AUTO                #Flux within a Kron-like elliptical aperture               [count]
 FLUXERR_AUTO             #RMS error for AUTO flux                                   [count]
 FLUX_APER[4]             #Flux vector within fixed circular aperture(s)             [count]
 FLUXERR_APER[4]          #RMS error vector for aperture flux(es)                    [count]
-SNR_WIN                  #Gaussian-weighted SNR
+#FLUX_PETRO               #Flux within a Petrosian-like elliptical aperture          [count]
+#FLUXERR_PETRO            #RMS error for PETROsian flux                              [count]
 FLUX_RADIUS              #Fraction-of-light radii                                   [pixel]
 KRON_RADIUS              #Kron apertures in units of A or B
 THETA_IMAGE              #Position angle (CCW/x)                                    [deg]              
 FWHM_IMAGE               #FWHM assuming a gaussian core                             [pixel]
 FWHM_WORLD               #FWHM assuming a gaussian core                             [deg]
-BACKGROUND               #Background at centroid position                           [count]
-THRESHOLD                #Detection threshold above background                      [count]
 FLUX_MAX                 #Peak flux above background                                [count]
-ELONGATION               #A_IMAGE/B_IMAGE                                          
 ELLIPTICITY              #1 - B_IMAGE/A_IMAGE
 A_IMAGE                  #Profile RMS along major axis                              [pixel]
 B_IMAGE                  #Profile RMS along minor axis                              [pixel]                                     

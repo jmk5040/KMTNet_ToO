@@ -1,55 +1,155 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #%% Import packages
+import time
+import shutil
 import numpy as np
+import os, re, glob
 import astropy.units as u
-import os, re, glob, time
 from astropy.io import fits
 from astropy.table import Table
 import matplotlib.pyplot as plt
 from astropy.coordinates import SkyCoord
-
-#%%
-def badpixel_clear():
-    return 0
-#%%
-def ks4_photometry(img, mask, path_output, path_cfg, pixscale=0.4, clsstar=0.8, apertures=['FWHM', 'APER3', 'APER5', 'APER10', 'AUTO'], detimg=None, start=None):
-
+#%% Import utility functions
+from KMTNet_util_functions import (
+    rss, apass_query, GAIAXP_query, sort_BVRI, limitmag, 
+    matching, star4zp, zpcal, add_colorbar, date2MJD, 
+    MJD2date, create_ldac_fits, hotpants, invert_image, 
+    mask2weight, generate_snapshot, rename_convention, 
+    safe_load_fits, find_longest_exposure_image, read_header,
+    parse_region_bounds, mosaic_image, combine_subtracted_images,
+    calculate_crosstalk_positions, build_sex_command
+)
+#%% KS4 Reference Image Reduction Functions
+#%% KS4 Reference Image Bad Pixel Cleaning
+def badpixel_clean(img, mask, outname, path_cfg, thresh=1e6):
     """
-    This function is used to update the header of the input image with the photometric zeropoint and other information.
-    """
-
-    import time
-    import shutil
+    Generate a bad-pixel corrected image using SExtractor's weighting scheme.
     
-    if os.path.isfile(detimg):
-        dualband = fits.getheader(detimg)['FILTER']
-        dualphot     = True
+    This function performs bad pixel correction by using SExtractor with an inverted bad pixel mask as the weight map. Valid pixels are assigned a value of 1 and masked regions a value of 0. The correction employs MASK_TYPE = CORRECT and enables CLEAN = Y to interpolate over masked regions and suppress spurious detections. A bad-pixel corrected image is generated using CHECKIMAGE_TYPE = -BACKGROUND, with BACK_TYPE = MANUAL and BACK_VALUE = 0, producing an image identical to the original except for the interpolated regions.
+    
+    Parameters
+    ----------
+    img : str
+        Path to the input FITS image file (stacked KMTNet image)
+    mask : str
+        Path to the bad pixel mask file (1 = bad pixel, 0 = good pixel)
+    outname : str
+        Path for the output corrected image file (cleaned KMTNet image)
+    path_cfg : str
+        Directory path containing SExtractor configuration files
+    thresh : float, optional
+        Detection threshold for SExtractor. Default is 1e6.
+        
+    Returns
+    -------
+    str
+        Path to the output corrected image file
+        
+    Notes
+    -----
+    The function uses the following SExtractor configuration files:
+    - kmtnet.sex: Main SExtractor configuration
+    - kmtnet_imask.param: Parameter file
+    - kmtnet.conv: Convolution filter
+    - kmtnet.nnw: Neural network weights
+    
+    The corrected image is identical to the original except for interpolated
+    regions where bad pixels were masked. This image is suitable for subsequent
+    photometric measurements and source catalog construction.
+    
+    Examples
+    --------
+    >>> corrected_img = badpixel_clean('science.fits', 'mask.fits', 
+    ...                                'corrected.fits', '/path/to/config/')
+    """
+    
+    # configs
+    cfg         = os.path.join(path_cfg, 'kmtnet.sex')
+    param       = os.path.join(path_cfg, 'kmtnet_imask.param')
+    conv        = os.path.join(path_cfg, 'kmtnet.conv')
+    nnw         = os.path.join(path_cfg, 'kmtnet.nnw')
 
-    mid     = time.time()
-    print('='*80)
-    print(f"{img} ({mid-start:.2f}sec elapsed)")
-    print('='*80)
-    # header
+    # weight image
+    weightname  = mask2weight(mask)
+    prompt_cat  = f' -c {cfg} -CATALOG_TYPE NONE'
+    prompt_cfg  = f' -PARAMETERS_NAME {param} -FILTER_NAME {conv} -STARNNW_NAME {nnw}'
+    prompt_wgt  = f' -WEIGHT_TYPE MAP_WEIGHT -WEIGHT_IMAGE {weightname} -MASK_TYPE CORRECT -RESCALE_WEIGHTS Y -WEIGHT_GAIN Y -DETECT_THRESH {thresh} -ANALYSIS_THRESH {thresh} -BACK_TYPE MANUAL -BACK_VALUE 0.0'
+    prompt_chk  = f' -CHECKIMAGE_TYPE -BACKGROUND -CHECKIMAGE_NAME {outname}'
+
+    prompt  = f'sex {img} {prompt_cat} {prompt_cfg} {prompt_wgt} {prompt_chk}'
+    os.system(prompt)
+
+    # remove temporary files
+    os.remove(weightname)
+
+    # update header
+    with fits.open(outname, 'update') as f:
+        for hdu in f:
+            hdu.header['MASKNAME']   = (os.path.basename(mask), "Bad pixel mask")
+            hdu.header['MASKTYPE']   = ('CORRECT', "Bad pixel mask cleared")
+    return outname    
+
+#%% KS4 Reference Image Photometry
+def ks4_photometry(img, mask, path_output, path_cfg, path_ref, path_result, pixscale=0.4, clsstar=0.8, apertures=['FWHM', 'APER3', 'APER5', 'APER10', 'AUTO'], detimg=None):
+    
+    from astropy.stats import sigma_clip
+    from astropy.table import Table, Column
+
+    """
+    Parameters
+    ----------
+    img : str
+        Path to the input FITS image file (stacked KMTNet image)
+    mask : str
+        Path to the bad pixel mask file (1 = bad pixel, 0 = good pixel)
+    path_output : str
+        Path for the output photometry catalog file
+    path_cfg : str
+        Directory path containing SExtractor configuration files
+    path_ref : str
+        Directory path containing GAIAXP catalog (for zero-point calibration)
+    path_result : str
+        Directory path for the output result files
+    pixscale : float, optional
+        Pixel scale of the image in arcsec/pixel. Default is 0.4.
+    clsstar : float, optional
+        Minimum CLASS_STAR value for point sources. Default is 0.8.
+    apertures : list, optional
+        List of aperture sizes to use for photometry. Default is ['FWHM', 'APER3', 'APER5', 'APER10', 'AUTO'].
+    detimg : str, optional
+        Path to the detection image file (if dual-band photometry is desired). Default is None.
+    """
+
+    # dualband check
+    singlephot = True
+    if detimg is not None and os.path.isfile(detimg):
+        try:
+            dualband = fits.getheader(detimg)['FILTER']
+            dualphot = True
+        except KeyError:
+            dualphot = False
+
+    # header check
     hdul    = fits.open(img)
     hdr     = hdul[0].header
     band    = hdr['FILTER']
-    field   = hdr['FIELD1']
+    field   = hdr['FIELD1'] # KS4 specific field name (0-2748)
 
-    # SExtractor photometry
-    # configs
-    cfg         = path_cfg+'ks4catalog.sex'
-    param       = path_cfg+'ks4catalog.param'
-    conv        = path_cfg+'default.conv'
-    nnw         = path_cfg+'default.nnw'
+    # SExtractor photometry configs
+    cfg         = os.path.join(path_cfg, 'kmtnet.sex')
+    param       = os.path.join(path_cfg, 'kmtnet_imask.param')
+    conv        = os.path.join(path_cfg, 'kmtnet.conv')
+    nnw         = os.path.join(path_cfg, 'kmtnet.nnw')
     
-    # seeing check (with 2k cropped image)
+    # seeing check (with 2k cropped image) with SExtractor
     try:
         seeing     = hdr['FWHM']
     except KeyError:
         if os.path.isfile(f'crop_{img}'): os.remove(f'crop_{img}')
         os.system('imcopy {0}[4000:6000,4000:6000] crop_{0}'.format(img))
-        os.system(f'sex crop_{img} -c {cfg} -PARAMETERS_NAME {path_cfg}ks4catalog_nomask.param -FILTER_NAME {conv} -STARNNW_NAME {nnw}')
+        os.system(f'sex crop_{img} -c {cfg} -PARAMETERS_NAME {param} -FILTER_NAME {conv} -STARNNW_NAME {nnw}')
+        # get seeing from the cropped image
         tempcat     = Table(fits.open('test.fits')[1].data)
         tempcat     = tempcat[tempcat['FWHM_IMAGE'] != 0]
         seeing      = np.median(tempcat[tempcat['CLASS_STAR']>np.median(tempcat['CLASS_STAR'])]['FWHM_IMAGE'] * pixscale)
@@ -58,6 +158,7 @@ def ks4_photometry(img, mask, path_output, path_cfg, pixscale=0.4, clsstar=0.8, 
     peeing      = seeing/pixscale
 
     # prompts
+    # apertures: should be more flexible for 2FWHM, ... (should be more flexible)
     photapers   = ','.join([str(float(ap.split('APER')[-1])/pixscale) for ap in apertures if ap != 'AUTO' and ap != 'FWHM'])
     if 'FWHM' in apertures:
         photapers  = f'{peeing},{photapers}'
@@ -65,14 +166,14 @@ def ks4_photometry(img, mask, path_output, path_cfg, pixscale=0.4, clsstar=0.8, 
     prompt_cfg  = f' -PARAMETERS_NAME {param} -FILTER_NAME {conv} -STARNNW_NAME {nnw}'
     prompt_flg  = f' -FLAG_IMAGE {mask} -FLAG_TYPE MAX'
     prompt_chk  = f' -CHECKIMAGE_TYPE BACKGROUND_RMS -CHECKIMAGE_NAME {img.replace(".fits",".bkgrms")}'
-    # photometry
+    # photometry catalog
     catname_single      = f'{path_output}ks4_{field}_{band}_single.fits'
     inim_single         = img
     prompt_catsingle    = f' -c {cfg} -CATALOG_NAME {catname_single}'
     prompt      = 'sex '+inim_single+prompt_catsingle+prompt_cfg+prompt_opt+prompt_flg+prompt_chk
     os.system(prompt)
 
-    # dual mode
+    # dual mode photometry catalog
     if dualphot:
         catname_dual   = f'{path_output}ks4_{field}_{band}_dual.fits'
         if band == dualband:
@@ -83,28 +184,373 @@ def ks4_photometry(img, mask, path_output, path_cfg, pixscale=0.4, clsstar=0.8, 
             prompt  = 'sex '+inim_dual+prompt_catdual+prompt_cfg+prompt_opt+prompt_flg
             os.system(prompt)
 
-    intbl_single    = Table(fits.open(catname_single)[1].data)
-    if dualphot: intbl_dual  = Table(fits.open(catname_dual)[1].data)
+    intbl_single    = Table.read(catname_single)
+    if dualphot: intbl_dual    = Table.read(catname_dual)
+
+    # zero-point calibration
+
+    # GAIAXP catalog query
+    try:
+        reftbl, bcoef, vcoef, rcoef, icoef  = GAIAXP_query(field, path_ref)
+    except FileNotFoundError:
+        print(f'{field} {band} GAIAXP catalog not found. ZP calibration skipped.')
+        return catname_single
+    reftbl  = reftbl[reftbl[f'GAIA_{band}flag']==1]
+
+    # matching with the reference
     
-    # FWHM update
-    seeing      = np.median(intbl_single[intbl_single['CLASS_STAR']>clsstar]['FWHM_IMAGE'] * pixscale)
-    peeing      = seeing/pixscale
-                    
+    for i, pros in enumerate([singlephot, dualphot]): 
+        
+        if pros:
+            rad = 2 # matching radius in arcsec
+            if i==0:
+                intbl   = Table.read(catname_single)
+                param_matching  = dict(intbl    = intbl,
+                                        reftbl   = reftbl,
+                                        inra     = intbl['ALPHA_J2000'], 
+                                        indec    = intbl['DELTA_J2000'],
+                                        refra    = reftbl['RAJ2000'], 
+                                        refdec   = reftbl['DEJ2000'],
+                                        sep      = rad)
+                ptbl    = matching(**param_matching)
+                mode    = 'single'
+            elif i==1:
+                intbl   = Table.read(catname_dual)
+                param_matching  = dict(intbl    = intbl,
+                                        reftbl   = reftbl,
+                                        inra     = intbl['ALPHA_J2000'], 
+                                        indec    = intbl['DELTA_J2000'],
+                                        refra    = reftbl['RAJ2000'], 
+                                        refdec   = reftbl['DEJ2000'],
+                                        sep      = rad)
+                ptbl    = matching(**param_matching)
+                mode    = 'dual'
+
+        # Split the aperture columns
+        for i, aperture in enumerate(apertures):
+            if aperture == 'AUTO':
+                pass
+            else:
+                intbl[f'MAG_{aperture}'] = Column([x[i] for x in intbl['MAG_APER']], name=f'MAG_{aperture}')
+                ptbl[f'MAG_{aperture}'] = Column([x[i] for x in ptbl['MAG_APER']], name=f'MAG_{aperture}')
+                intbl[f'MAGERR_{aperture}'] = Column([x[i] for x in intbl['MAGERR_APER']], name=f'MAGERR_{aperture}')
+                ptbl[f'MAGERR_{aperture}'] = Column([x[i] for x in ptbl['MAGERR_APER']], name=f'MAGERR_{aperture}')
+
+        # Initialize the columns
+        for col in ['MISALIGN', 'MISALIGNERR', 'NUMASTRO', 'NUMPHOTO']:
+            if col not in intbl.colnames:
+                intbl[col] = [-99.] * len(intbl)  # Initialize with default value -99
+
+            # Bin configuration
+            centbins    = 200
+            extbins     = 1000
+            bin_edges   = np.arange(0, 22001, centbins) # 22001 = hdr['NAXIS1']+1
+
+            # Filter the table for the 'single' mode
+            if mode == 'single':
+                ptbl = ptbl[(ptbl['FLAGS'] == 0) & (ptbl['IMAFLAGS_ISO'] == 0) & (ptbl['CLASS_STAR']>clsstar)]
+                ptbl = ptbl[ptbl['MAGERR_AUTO']<0.05]
+                ptbl = ptbl[ptbl['phot_g_mean_mag']<20]
+                ptbl = ptbl[ptbl['phot_g_mean_mag']>14]
+                # Precompute overlap masks
+                overlap_mask_x = {
+                    l: (ptbl['X_IMAGE'] >= bin_edges[l - 1] - (extbins - centbins) / 2) &
+                    (ptbl['X_IMAGE'] < bin_edges[l] + (extbins - centbins) / 2)
+                    for l in range(1, len(bin_edges))
+                }
+
+                overlap_mask_y = {
+                    m: (ptbl['Y_IMAGE'] >= bin_edges[m - 1] - (extbins - centbins) / 2) &
+                    (ptbl['Y_IMAGE'] < bin_edges[m] + (extbins - centbins) / 2)
+                    for m in range(1, len(bin_edges))
+                }
+
+                # Initialize maps
+                num_bins = len(bin_edges) - 1
+                align_map = np.zeros((num_bins, num_bins))
+                alerr_map = np.zeros((num_bins, num_bins))
+                astar_map = np.zeros((num_bins, num_bins))
+
+                for l in range(1, len(bin_edges)):
+                    for m in range(1, len(bin_edges)):
+                    # Ensure correct overlap masks for X and Y
+                        x_in_overlap = overlap_mask_x.get(l, np.zeros(len(ptbl), dtype=bool))
+                        y_in_overlap = overlap_mask_y.get(m, np.zeros(len(ptbl), dtype=bool))
+                        indexes = np.where(x_in_overlap & y_in_overlap)
+                        amatches = ptbl[indexes]
+                        # Calculate median misalignment for the bin
+                        if len(amatches) > 0:
+                            misalign = np.median(amatches['sep']) * 3600  # Convert to arcseconds
+                            misalerr = np.std(amatches['sep']) * 3600  # Convert to arcseconds
+                        else:
+                            misalign = 0  # No matches in the bin
+                            misalerr = 0
+
+                        # Assign values to the maps
+                        align_map[l - 1, m - 1] = misalign
+                        alerr_map[l - 1, m - 1] = misalerr
+                        astar_map[l - 1, m - 1] = len(amatches)  # Number of matches in the bin
+            # Assign astrometric corrections to the table
+            x_bins_intbl = np.digitize(intbl['X_IMAGE'], bins=bin_edges) - 1
+            y_bins_intbl = np.digitize(intbl['Y_IMAGE'], bins=bin_edges) - 1
+            intbl['MISALIGN'] = align_map[x_bins_intbl, y_bins_intbl]
+            intbl['NUMASTRO'] = astar_map[x_bins_intbl, y_bins_intbl]
+
+            # Save astrometric correction maps
+            np.save(f'{path_result}align_map_{field}_{band}_{mode}.npy', align_map)
+            np.save(f'{path_result}alerr_map_{field}_{band}_{mode}.npy', alerr_map)
+            np.save(f'{path_result}astar_map_{field}_{band}_{mode}.npy', astar_map)
+
+            # Photometric zero-point calculation
+            for aperture in apertures:
+                
+                refmaglower = 14
+                refmagupper = 19
+                flagcut = 0
+
+                # Filter ptbl to create ctbl
+                ctbl = ptbl[(ptbl['IMAFLAGS_ISO'] == 0) & (ptbl['CLASS_STAR']>clsstar)]
+                ctbl = ctbl[ctbl[f'MAG_{aperture}'] != 99]
+                ctbl = ctbl[ctbl['FLAGS'] <= flagcut]
+                ctbl = ctbl[ctbl[f'{band}mag'] < refmagupper]
+                ctbl = ctbl[ctbl[f'{band}mag'] > refmaglower]
+
+                param_zpcal     = dict(intbl=ctbl, inmagkey=f'MAG_{aperture}', refmagkey=f'{band}mag', sigma=2.0)
+
+                global_zp, global_zper, otbl, xtbl = zpcal(**param_zpcal)
+                with fits.open(img, 'update') as f:
+                    for hdu in f:
+                        hdu.header[f'ZP{aperture}']   = (round(global_zp, 3), f'Photometric zero-point for {aperture} [ABmag]')
+                        hdu.header[f'ZE{aperture}']   = (round(global_zper, 3), f'Photometric zero-point uncertainty for {aperture} [ABmag]')
+                        hdu.header[f'ZS{aperture}']   = (len(otbl), f'The number of stars for {aperture} zero-point calculation')
+
+                # Initialize the columns
+                for col_type in ['ZP', 'ZPERR']:
+                    col_name = f'{col_type}_{aperture}'
+                    if col_name not in intbl.colnames:
+                        intbl[col_name] = [-99.0] * len(intbl)
+
+                # Bin configuration (400x400)
+                centbins    = 400
+                extbins     = 400
+                bin_edges   = np.arange(0, 22001, centbins)
+
+                # Initialize the maps
+                num_bins = len(bin_edges) - 1
+                zp_map = np.zeros((num_bins, num_bins))
+                zperr_map = np.zeros((num_bins, num_bins))
+                pstar_map = np.zeros((num_bins, num_bins))
+
+                overlap_mask_x = {
+                    l: (ctbl['X_IMAGE'] >= bin_edges[l - 1] - (extbins - centbins) / 2) &
+                    (ctbl['X_IMAGE'] < bin_edges[l] + (extbins - centbins) / 2)
+                    for l in range(1, len(bin_edges))
+                }
+
+                overlap_mask_y = {
+                    m: (ctbl['Y_IMAGE'] >= bin_edges[m - 1] - (extbins - centbins) / 2) &
+                    (ctbl['Y_IMAGE'] < bin_edges[m] + (extbins - centbins) / 2)
+                    for m in range(1, len(bin_edges))
+                }
+
+                # Iterate over bins (400x400)
+                for l in range(1, len(bin_edges)):
+                    for m in range(1, len(bin_edges)):
+                        # Combine overlap masks (400x400)
+                        x_in_overlap = overlap_mask_x[l]
+                        y_in_overlap = overlap_mask_y[m]
+                        indexes = np.where(x_in_overlap & y_in_overlap)
+                        pmatches = ctbl[indexes]
+
+                        # Extract matches
+                        align_map   = np.load(f'{path_result}align_map_{field}_{band}_{mode}.npy')
+                        radius = np.max([0.5 / 3600, align_map[l - 1, m - 1]])
+                        pmatches = pmatches[pmatches['sep'] < radius]
+
+                        # Calculate statistics
+                        if len(pmatches) > 0:
+                            # Extract non-masked (valid) values after clipping
+                            zplist = pmatches[f'{band}mag'] - pmatches[f'MAG_{aperture}']
+                            zplist_clipped = sigma_clip(zplist, sigma=2, maxiters=None, cenfunc='median')
+                            valid_zplist = zplist_clipped.data[~zplist_clipped.mask]
+
+                            zp_map[l - 1, m - 1] = np.median(valid_zplist)
+                            zperr_map[l - 1, m - 1] = np.std(valid_zplist)
+                            pstar_map[l - 1, m - 1] = len(valid_zplist)
+                        else:
+                            zp_map[l - 1, m - 1] = 30
+                            zperr_map[l - 1, m - 1] = 0
+                            pstar_map[l - 1, m - 1] = 0
+                x_bins_intbl = np.digitize(intbl['X_IMAGE'], bins=bin_edges) - 1
+                y_bins_intbl = np.digitize(intbl['Y_IMAGE'], bins=bin_edges) - 1
+                
+                # Assign corrections to sources
+                intbl[f'MAG_{aperture}'] += zp_map[x_bins_intbl, y_bins_intbl]
+                intbl[f'MAGERR_{aperture}'] = np.sqrt(
+                    intbl[f'MAGERR_{aperture}'] ** 2 + zperr_map[x_bins_intbl, y_bins_intbl] ** 2
+                )
+                intbl[f'ZP_{aperture}'] = zp_map[x_bins_intbl, y_bins_intbl]
+                intbl[f'ZPERR_{aperture}'] = zperr_map[x_bins_intbl, y_bins_intbl]
+
+                # save result map
+                np.save(f'{path_result}zp_map_{field}_{band}_{mode}_{aperture}.npy', zp_map)
+                np.save(f'{path_result}zperr_map_{field}_{band}_{mode}_{aperture}.npy', zperr_map)
+                np.save(f'{path_result}pstar_map_{field}_{band}_{mode}_{aperture}.npy', pstar_map)
+
+                # depth check
+                if aperture=='FWHM' and mode=='single':
+                    bkgrms  = fits.getdata(img.replace(".fits",".bkgrms"))
+                    skysig  = np.median(bkgrms[bkgrms!=0])
+                    depth   = limitmag(5, global_zp, peeing, skysig)
+                    os.system(f'rm {img.replace(".fits",".bkgrms")}')
+
+            intbl['NUMPHOTO'] = pstar_map[x_bins_intbl, y_bins_intbl]
+            zpcatname   = f'{path_result}ks4_{field}_{band}_{mode}.zp.fits'
+
+    # update header
+    seeing      = np.median(intbl_single[intbl_single['CLASS_STAR']>clsstar]['FWHM_IMAGE'] * pixscale)       
     with fits.open(img, 'update') as f:
         for hdu in f:
             hdu.header['FWHM']      = (round(seeing, 3), "Median seeing of point sources [arcsec]")
             hdu.header['FLAGIMG']   = (os.path.basename(mask), "Mask image for IMAFLAGS_ISO")
+            hdu.header['DEPTH5']    = (depth, "5sigma detection limiting magnitude for seeing size aperture")
+            hdu.header['PHOTREF']   = ("Gaia XP", "Reference catalog used for source catalog generation")
 
-    return
+    return zpcatname
 
-#%%
-def zeropoint_map_calibration():
-    return
-#%%
-def zeropoint_homogenization():
+#%% plot photometry residue and RMSE calculation
+def plot_phot_residue(img, intbl, reftbl, path_plot, aperture='AUTO', clsstar=0.8, maglower=14, magupper=19, flagcut=0, magerrcut=0.05, hdr_update=False):
+
+    from astropy.stats import sigma_clip
+    import matplotlib.gridspec as gridspec
+
+    # header information
+    field   = fits.getheader(img)['FIELD1']
+    band    = fits.getheader(img)['FILTER']
+
+    # reference catalog matching
+    param_matching  = dict(intbl    = intbl,
+            reftbl   = reftbl,
+            inra     = intbl['ALPHA_J2000'], 
+            indec    = intbl['DELTA_J2000'],
+            refra    = reftbl['RAJ2000'], 
+            refdec   = reftbl['DEJ2000'],
+            sep      = 0.5)
+    tester    = matching(**param_matching)
+    tester  = tester[tester[f'MAG_{aperture}']>maglower]
+    tester  = tester[tester[f'MAG_{aperture}']<magupper]
+    tester  = tester[tester['FLAGS']==flagcut]
+    tester  = tester[tester['IMAFLAGS_ISO']==0]
+    tester  = tester[tester['CLASS_STAR']>clsstar]
+    tester  = tester[tester[f'MAGERR_{aperture}']<magerrcut]
+    
+    # photometry comparison
+    magdif  = tester[f'MAG_{aperture}']-tester[f'{band}mag']
+    magerr  = tester[f'MAGERR_{aperture}']
+    meddif  = round(np.nanmedian(magdif), 3)
+    clean_magdif = magdif[np.isfinite(magdif)]
+    clipped = sigma_clip(clean_magdif, sigma=3)
+    rmse = round(np.sqrt(np.nanmean(clipped**2)), 3)
+    
+    # plot
+    plt.figure(figsize=(8, 12))
+    gs = gridspec.GridSpec(15, 15)
+    plt.rcParams.update({'font.size': 14})
+
+    plt.suptitle(f'KS4 & REF Photometry Comparison\nField : {field}, MAG_{aperture}, {band} band,\nMagnitude Difference RMSE : {rmse:.3f} ABmag\n5$\sigma$ Image Depth : ABmag')
+    ax_1d   = plt.subplot(gs[9:15, :10])
+    ax_hist = plt.subplot(gs[9:15, 10:])
+    ax_2d   = plt.subplot(gs[0:8, :14])
+
+    ax_1d.errorbar(tester[f'MAG_{aperture}'], magdif, yerr=magerr, ms=6, ls='', c='crimson', marker='o', capsize=4, capthick=1, alpha=0.1)
+    ax_1d.set(xlabel=r'$m_{KS4}$ [ABmag]', ylabel=r'$m_{KS4} - m_{REF}$ [ABmag]')
+    ax_1d.set_xlim(19.5,13.75)
+    ax_1d.set_ylim(-1,1)
+    ax_1d.grid(which='major',linestyle='-', alpha=0.5)
+    
+    # histograms
+    uweights   = np.ones_like(magdif)/len(magdif)
+    ax_hist.hist(magdif,weights=uweights, bins=np.arange(-1,1,0.05), color='crimson', orientation='horizontal',align='mid')
+    ax_hist.axhline(y=meddif, color='dodgerblue', linestyle='-', alpha=0.75, label='{:6}={:6.3f}mag'.format('Median', meddif))
+    ax_hist.axhline(y=meddif-rmse, color='dodgerblue', linestyle='--', alpha=0.75, label='{:6}={:6.3f}mag'.format('RMSE', rmse))
+    ax_hist.axhline(y=meddif+rmse, color='dodgerblue', linestyle='--', alpha=0.75)
+    ax_hist.axes.yaxis.set_ticklabels([])
+    ax_hist.set(xlabel='proportion')
+    ax_hist.set_ylim(-1,1)
+    ax_hist.legend(fontsize=10, loc='upper right')
+    ax_hist.grid(which='major',linestyle='-', alpha=0.5)
+    
+    plot = ax_2d.scatter(tester['X_IMAGE'], tester['Y_IMAGE'], marker='o', c=magdif, cmap='seismic', edgecolor='k', alpha=0.7, label=f'FLAG==0 ({len(tester)})\nCLASS_STAR>{clsstar}')
+    add_colorbar(plot, clabel=r'$m_{KS4} - m_{REF}$ [mag]', clim=[-0.5, 0.5])
+    ax_2d.legend(loc='upper right')
+    ax_2d.set(xlabel='X axis [pixel]', ylabel='Y axis [pixel]')
+    ax_2d.set_xlim(-1000, 24000)
+    ax_2d.set_ylim(-1000, 24000)
+    plt.savefig(f'{path_plot}RESIDUEMAP_{field}_{band}_{aperture}.png')
+    print(f'{path_plot}RESIDUEMAP_{field}_{band}_{aperture}.png saved')
+    plt.close()
+
+    if hdr_update:
+        with fits.open(img, 'update') as f:
+            for hdu in f:
+                hdu.header['RMSPHOT']   = (rmse, f'RMSE of PHOTREF mag - KMTN mag (3sigma clipped) for {aperture} aperture')
+    
+    return 0
+
+#%% zero-point homogenization using zero-point correctionmap
+def zeropoint_homogenization(img, path_map, outname, aperture='APER5', mode='single', zp_to_scale=30):
+        
+    from scipy.ndimage import zoom
+
+    hdul    = fits.open(img)
+    data    = hdul[0].data
+    hdr     = hdul[0].header
+    field   = hdr['FIELD1']
+    band    = hdr['FILTER']
+
+    # ZP scaling process
+    # ZP map load
+    zp_map  = np.load(f'{path_map}zp_map_{field}_{band}_{mode}_{aperture}.npy')
+    zperr_map = np.load(f'{path_map}zperr_map_{field}_{band}_{mode}_{aperture}.npy')
+
+    # ZP scaler define
+    del_zp = zp_to_scale - zp_map
+    fratio = 10**(del_zp/(2.5))
+
+    # Upscale the flux ratio map to match the image physical dimension
+    upscale_factor = data.shape[0] // zp_map.shape[0]
+    fratio_upscaled = zoom(fratio, upscale_factor, order=1)
+
+    # Apply the flux ratio to the image
+    data_scaled = data * fratio_upscaled.T
+    data_scaled = data_scaled.astype(np.float32)
+    
+    # Save the corrected image
+    # headers for zero-points
+    zp_error = round(np.mean(zperr_map[zperr_map != 0]), 3)
+
+    mapping = {
+        'FWHM'  : 'seeing size aperture',
+        'AUTO'  : 'Kron-like aperture',
+        'APER3' : '3 arcsec aperture',
+        'APER5' : '5 arcsec aperture',
+        'APER10': '10 arcsec aperture',
+    }
+
+    apstring =  mapping.get(aperture, f'{aperture}')
+
+    hdr['MAGZERO']  = (zp_to_scale, f"Magnitude zeropoint for {apstring}.")
+    hdr['EMAGZERO'] = (zp_error, f"Zeropoint uncertainty for {apstring}.")
+
+    hdr['SATURATE'] = int(np.mean(fratio)*hdr['SATURATE'])
+    hdr['UNDERSAT'] = int(np.mean(fratio)*hdr['UNDERSAT'])
+    hdr['PHOTREF'] = 'GAIA DR3'
+
+    fits.writeto(outname, data_scaled, hdr, overwrite=True)
+
     return 
 
-#%%
+#%% load zero-point correction map
 def load_map(map_category, field, band, mode, aperture=None, directory="."):
     """
     Load a 2D numpy map from a .npy file.
@@ -142,6 +588,7 @@ def load_map(map_category, field, band, mode, aperture=None, directory="."):
     map_array = np.load(filepath)
     return map_array
 
+#%% get zero-point correction map value for target
 def get_map_value_for_target(x, y, map_array, physical_max=22000):
     """
     Get the map value for a single target given its x and y coordinates.
@@ -170,6 +617,7 @@ def get_map_value_for_target(x, y, map_array, physical_max=22000):
     
     return map_array[x_bin, y_bin]
 
+#%% assign zero-point correction map values to catalog
 def assign_map_values_to_catalog(intbl, map_array, x_key='X_IMAGE', y_key='Y_IMAGE', 
                                  new_col='ZP', physical_max=22000):
     """
@@ -212,33 +660,124 @@ def assign_map_values_to_catalog(intbl, map_array, x_key='X_IMAGE', y_key='Y_IMA
     intbl[new_col] = map_array[x_bins, y_bins]
     return intbl
 
+# %% Pan-STARRS-1 Reference Image Generation with "PanStitch" (in case of no KS4 reference image)
+def generate_panstarrs_reference(
+    field,
+    cra,
+    cdec,
+    path_output,
+    path_cfg,
+    filte='r',
+    xsize=22000,
+    ysize=22000,
+    pixscale=0.4,
+    n_grid=16,
+    m_grid=16,
+    margin_frac=0.0,
+    slice_size=4000,
+    swarp_config='kmtnet.swarp'
+):
+    """
+    Generates a Pan-STARRS-1 reference image for a given field using PanStitch.
 
-#%%
-    numimg  = hdr['NUMIMAGE']
-        
-    center  = [hdr['CRVAL1'], hdr['CRVAL2']]
-    
-    xscale  = hdr['NAXIS1'] * pixscale # arcsec
-    yscale  = hdr['NAXIS2'] * pixscale # arcsec
-    frac    = 2.1
-    radius  = frac*np.mean([xscale, yscale])/3600 # searching radius in deg
-            
-    obses = []
-    for l in range(numimg):
-        obses.append(hdr[f'OBSERV{hex(l)[-1]}'])
+    This function performs the following steps:
+    1. Generates a grid of coordinates to cover the desired field of view.
+    2. Queries the Pan-STARRS archive to get image information.
+    3. Downloads the individual image slices.
+    4. Uses SWarp to stitch the slices into a single FITS image.
 
+    Parameters:
+      field (str): The name of the target field (e.g., "0123.4").
+      cra (str): The center Right Ascension in hms.
+      cdec (str): The center Declination in dms.
+      path_output (str): The directory to save the output files.
+      path_cfg (str): The directory containing configuration files (e.g., kmtnet.swarp).
+      filte (str): The filter to use ('g', 'r', 'i', 'z', 'y'). Default is 'r'.
+      xsize (int): The width of the final image in pixels. Default is 22000.
+      ysize (int): The height of the final image in pixels. Default is 22000.
+      pixscale (float): The pixel scale of the final image in arcsec/pixel. Default is 0.4.
+      n_grid (int): The number of grid points along the RA axis. Default is 8.
+      m_grid (int): The number of grid points along the Dec axis. Default is 8.
+      margin_frac (float): The fractional margin for downloading slices. Default is 0.0.
+      slice_size (int): The size of the individual download slices in pixels. Default is 6000.
+      swarp_config (str): The name of the swarp configuration file. Default is 'kmtnet.swarp'.
+
+    Returns:
+      str: The path to the final stacked FITS image.
+    """
     try:
-        reftbl, bcoef, vcoef, rcoef, icoef  = GAIAXP_query(field, os.path.join(path_cat, 'gaiaxp'), nctio=obses.count('kmtc'), nsaao=obses.count('kmts'), nsso=obses.count('kmta'))
-    except FileNotFoundError:
-        path_ref    = f'{path_cat}apass/'
-        os.makedirs(path_ref, exist_ok=True)
-        try:
-            reftbl  = ascii.read(f'{path_ref}apass_{field}.cat')
-        except FileNotFoundError:
-            frac    = 3 # >2*np.sqrt(2) due to dithering
-            radius  = frac*np.mean([xscale, yscale])/3600 # searching radius in deg
-            reftbl  = apass_query(center.ra.deg, center.dec.deg, radius)
-            reftbl.write(f'{path_ref}apass_{field}.cat', format='ascii', overwrite=True)
-        hdr['PHOTREF']  = 'APASS DR9'
+        from PanStitch import (
+            generate_pointings, getimages, download_images_for_pointings,
+            write_images_to_swarp, degrees_to_hms_dms, run_swarp
+        )
+    except ImportError:
+        raise ImportError(
+            "PanStitch package is required for Pan-STARRS reference image generation. "
+            "Install it with: pip install PanStitch"
+        )
 
-    reftbl  = reftbl[reftbl[f'XP_{band}flag']==1]
+    # 1. Define paths
+    path_slice = os.path.join(path_output, 'ps1_slice')
+    os.makedirs(path_slice, exist_ok=True)
+    path_swarp_conf = os.path.join(path_cfg, swarp_config)
+    list_file_path = os.path.join(path_slice, 'images_to_stitch.txt')
+
+    # 2. Generate the grid of coordinates to download
+    print(f"Generating {n_grid}x{m_grid} grid for {field} at ({cra}, {cdec})...")
+    coord = SkyCoord(cra, cdec, unit=(u.hourangle, u.deg))
+    cra_deg = coord.ra.deg
+    cdec_deg = coord.dec.deg
+    pointings = generate_pointings(cra_deg, cdec_deg, xsize, ysize, pixscale, n=n_grid, m=m_grid, margin_frac=margin_frac)
+
+    # 3. Get image info from Pan-STARRS
+    print("Querying Pan-STARRS for image information...")
+    tra = [p[0] for p in pointings]
+    tdec = [p[1] for p in pointings]
+    try:
+        image_table = getimages(tra, tdec, filters=filte, size=slice_size)
+    except:
+        print(f"No PS1 image found for {field} at ({cra}, {cdec})")
+        return None
+
+    # 4. Download the actual image files
+    print(f"Downloading {len(image_table)} image slices to {path_slice}...")
+    image_files = download_images_for_pointings(image_table, path_slice)
+
+    # 5. Prepare and run SWarp to stitch the images
+    print("Stitching images with SWarp...")
+    write_images_to_swarp(list_file_path, image_files)
+
+    # Calculate median exposure time for the output filename
+    try:
+        exptime = int(np.median([fits.getheader(f)['EXPTIME'] for f in image_files]))
+    except Exception as e:
+        print(f"Could not determine median exposure time: {e}. Using 0.")
+        exptime = 100
+
+    path_outim = os.path.join(path_output, f'ps1.{field}.{filte.upper()}.{exptime}sec.reduced.scaled.stack.fits')
+    
+    run_swarp(
+        list_file_path,
+        path_outim,
+        path_swarp_conf,
+        cra,
+        cdec,
+        xsize=xsize,
+        ysize=ysize
+    )
+    # remove weight image
+    os.remove(path_outim.replace('.fits', '.weight.fits'))
+    # update header
+    with fits.open(path_outim, 'update') as f:
+        for hdu in f:
+            hdu.header['OBJECT']    = f'{field}'
+            hdu.header['FILTER']    = filte.upper()
+            hdu.header['EXPTIME']   = exptime
+            hdu.header['FWHM']      = 1.5
+            hdu.header['CENTRA']    = cra
+            hdu.header['CENTDEC']   = cdec
+
+    os.system(f'chmod 777 {path_outim}')
+    print(f"Process completed. Stacked image saved to: {path_outim}")
+
+    return path_outim
