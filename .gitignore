@@ -9,3 +9,11 @@ rbclass_kmtnet/
 *.png
 *.jpg
 *.npy
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
