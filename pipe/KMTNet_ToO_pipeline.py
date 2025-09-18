@@ -1,33 +1,18 @@
 #%% path defines
 import time, os, sys, glob, re, copy, shutil, subprocess
-path_base   = './'
 
-path_data   = os.path.join(path_base, 'data/')
-path_cfg    = os.path.join(path_base, 'config/')
-path_cat    = os.path.join(path_base, 'catalog/')
+# Import path configuration from centralized config file
+# This approach provides several benefits:
+# 1. All paths are automatically relative to the repository root
+# 2. Works regardless of where the user runs the script from
+# 3. Centralized configuration - change paths in one place
+# 4. Automatic directory creation - no manual setup required
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from config.working_directory_structure import *
 
-path_raw    = os.path.join(path_data, 'raw/')
-path_scale  = os.path.join(path_data, 'scaled/')
-path_stack  = os.path.join(path_data, 'stack/')
-path_subt   = os.path.join(path_data, 'subt/')
-path_tmpl   = os.path.join(path_data, 'tmpl/')
-
-path_res    = os.path.join(path_base, 'result/')
-path_plot   = os.path.join(path_res, 'plot/')
-path_log    = os.path.join(path_res, 'log/')
-
-# Create necessary directories
-os.makedirs(path_data, exist_ok=True)
-os.makedirs(path_cfg, exist_ok=True)
-os.makedirs(path_cat, exist_ok=True)
-os.makedirs(path_raw, exist_ok=True)
-os.makedirs(path_scale, exist_ok=True)
-os.makedirs(path_stack, exist_ok=True)
-os.makedirs(path_subt, exist_ok=True)
-os.makedirs(path_tmpl, exist_ok=True)
-os.makedirs(path_res, exist_ok=True)
-os.makedirs(path_plot, exist_ok=True)
-os.makedirs(path_log, exist_ok=True)
+# Create all necessary directories for the pipeline
+# This ensures the directory structure exists before processing begins
+create_directories()
 
 #%% KMTNet ToO Pipeline
 from astropy.io import fits
