@@ -1,0 +1,51 @@
+HISTORY   Astrometric solution by SCAMP version 2.7.8 (2019-10-18)
+COMMENT   (c) 2010-2018 Sorbonne Université/Université de Bordeaux/CNRS
+COMMENT   
+EQUINOX =        2000.00000000 / Mean equinox                                  
+RADESYS = 'ICRS    '           / Astrometric system                            
+CTYPE1  = 'RA---TPV'           / WCS projection type for this axis             
+CTYPE2  = 'DEC--TPV'           / WCS projection type for this axis             
+CUNIT1  = 'deg     '           / Axis unit                                     
+CUNIT2  = 'deg     '           / Axis unit                                     
+CRPIX1  =  -3.085915230660E+02 / Reference pixel on this axis                  
+CRPIX2  =  -5.283842577920E+02 / Reference pixel on this axis                  
+CD1_1   = -0.00011142886390231265
+CD1_2   = -1.248206937111639e-07
+CD2_1   = -1.3932073858646551e-06
+CD2_2   = 0.00011096178655754492
+PV1_0   = 0.0053251449870305705
+PV1_1   = 1.01356765387791
+PV1_2   = -0.005026969172682823
+PV1_3   = -0.0007810544280220878
+PV1_4   = -0.00039449915169448226
+PV1_5   = 0.002098849810634467
+PV1_6   = -9.05244206031447e-09
+PV1_7   = -0.010197933792944218
+PV1_8   = 0.0014745885269242403
+PV1_9   = -0.010377388410097058
+PV1_10  = 0.0005227387938999732
+PV1_11  = -0.0005786609884942149
+PV2_0   = -0.005801537572332277
+PV2_1   = 1.0205544342296977
+PV2_2   = -0.005175010708414255
+PV2_3   = 0.000320463185895874
+PV2_4   = 0.0010386803902229808
+PV2_5   = -0.001633302709741528
+PV2_6   = 0.00031079658797876643
+PV2_7   = -0.01004227393957412
+PV2_8   = 0.0010685439949067303
+PV2_9   = -0.010306363254918138
+PV2_10  = 0.00036214831820181864
+PV2_11  = 0.00021525025900327814
+FGROUPNO=                    1 / SCAMP field group label                       
+ASTIRMS1=   0.000000000000E+00 / Astrom. dispersion RMS (intern., high S/N)    
+ASTIRMS2=   0.000000000000E+00 / Astrom. dispersion RMS (intern., high S/N)    
+ASTRRMS1=   8.830754849513E-06 / Astrom. dispersion RMS (ref., high S/N)       
+ASTRRMS2=   7.677462220756E-06 / Astrom. dispersion RMS (ref., high S/N)       
+ASTINST =                    1 / SCAMP astrometric instrument label            
+FLXSCALE=   0.000000000000E+00 / SCAMP relative flux scale                     
+MAGZEROP=           0.00000000 / SCAMP zero-point                              
+PHOTIRMS=           0.00000000 / mag dispersion RMS (internal, high S/N)       
+PHOTINST=                    1 / SCAMP photometric instrument label            
+PHOTLINK=                    F / True if linked to a photometric field         
+END     
