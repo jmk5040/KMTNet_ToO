@@ -420,6 +420,112 @@ def ks4_photometry(img, mask, path_output, path_cfg, path_ref, path_result, pixs
 
 #%% plot photometry residue and RMSE calculation
 def plot_phot_residue(img, intbl, reftbl, path_plot, aperture='AUTO', clsstar=0.8, maglower=14, magupper=19, flagcut=0, magerrcut=0.05, hdr_update=False):
+    """
+    Plot photometry residue and calculate RMSE for KMTNet reference images.
+    
+    This function compares photometric measurements between KMTNet images and reference
+    catalogs to assess photometric quality. It generates diagnostic plots showing
+    magnitude differences, spatial distribution of residuals, and statistical metrics
+    for photometric calibration validation.
+    
+    Parameters
+    ----------
+    img : str
+        Path to the KMTNet FITS image file. The function extracts field and band
+        information from the FITS header (FIELD1 and FILTER keywords).
+    intbl : astropy.table.Table
+        Input source catalog from SExtractor containing photometric measurements.
+        Must include columns: ALPHA_J2000, DELTA_J2000, MAG_{aperture}, MAGERR_{aperture},
+        FLAGS, IMAFLAGS_ISO, CLASS_STAR, X_IMAGE, Y_IMAGE.
+    reftbl : astropy.table.Table
+        Reference catalog for photometric comparison. Must include columns:
+        RAJ2000, DEJ2000, {band}mag (where {band} is the filter band).
+    path_plot : str
+        Path to the output directory where diagnostic plots will be saved.
+    aperture : str, optional
+        Aperture type for photometric comparison ('AUTO', 'APER3', 'APER5', etc.).
+        Default is 'AUTO'.
+    clsstar : float, optional
+        Minimum CLASS_STAR value for stellar source selection. Default is 0.8.
+    maglower : float, optional
+        Lower magnitude limit for source selection. Default is 14.
+    magupper : float, optional
+        Upper magnitude limit for source selection. Default is 19.
+    flagcut : int, optional
+        Maximum FLAGS value to accept for source selection. Default is 0.
+    magerrcut : float, optional
+        Maximum magnitude error to accept for source selection. Default is 0.05.
+    hdr_update : bool, optional
+        Whether to update the FITS header with RMSE information. Default is False.
+    
+    Returns
+    -------
+    int
+        Returns 0 upon successful completion.
+    
+    Notes
+    -----
+    The function performs the following operations:
+    
+    1. **Source Matching**:
+       - Matches sources between input and reference catalogs
+       - Uses 0.5 arcsecond matching radius
+       - Applies quality cuts for reliable photometric comparison
+    
+    2. **Quality Filtering**:
+       - Magnitude range: maglower < MAG_{aperture} < magupper
+       - FLAGS = flagcut (excludes sources with detection flags)
+       - IMAFLAGS_ISO = 0 (excludes sources with bad pixels)
+       - CLASS_STAR > clsstar (selects stellar sources)
+       - MAGERR_{aperture} < magerrcut (excludes sources with large errors)
+    
+    3. **Photometric Analysis**:
+       - Calculates magnitude differences: MAG_{aperture} - {band}mag
+       - Computes median difference and RMSE using 3-sigma clipping
+       - Assesses photometric precision and systematic offsets
+    
+    4. **Diagnostic Plot Generation**:
+       - **1D Plot**: Magnitude difference vs. magnitude with error bars
+       - **Histogram**: Distribution of magnitude differences
+       - **2D Map**: Spatial distribution of photometric residuals
+       - **Statistics**: Median difference and RMSE displayed
+    
+    5. **Header Updates** (if requested):
+       - Adds RMSPHOT keyword with RMSE value
+       - Records photometric precision for quality assessment
+    
+    Quality Cuts Applied
+    --------------------
+    - **FLAGS = flagcut**: Excludes sources with detection flags
+    - **IMAFLAGS_ISO = 0**: Excludes sources with bad pixels
+    - **CLASS_STAR > clsstar**: Selects stellar sources only
+    - **Magnitude range**: maglower < MAG_{aperture} < magupper
+    - **Magnitude error**: MAGERR_{aperture} < magerrcut
+    
+    Output Files
+    ------------
+    - **Diagnostic Plot**: `RESIDUEMAP_{field}_{band}_{aperture}.png`
+    
+    Header Keywords Added (if hdr_update=True)
+    ------------------------------------------
+    - RMSPHOT: RMSE of photometric differences (3-sigma clipped)
+    
+    Examples
+    --------
+    >>> plot_phot_residue('/path/to/image.fits', input_catalog, reference_catalog,
+    ...                   '/path/to/plots/', aperture='AUTO', clsstar=0.8,
+    ...                   maglower=14, magupper=19, hdr_update=True)
+    
+    See Also
+    --------
+    zeropoint_homogenization : Zero-point correction function
+    KMTNet_ToO_functions.zpscale : Zero-point scaling function
+    
+    Notes
+    -----
+    This function is typically used for photometric quality assessment of reference
+    images and validation of zero-point calibrations.
+    """
 
     from astropy.stats import sigma_clip
     import matplotlib.gridspec as gridspec
@@ -499,6 +605,108 @@ def plot_phot_residue(img, intbl, reftbl, path_plot, aperture='AUTO', clsstar=0.
 
 #%% zero-point homogenization using zero-point correctionmap
 def zeropoint_homogenization(img, path_map, outname, aperture='APER5', mode='single', zp_to_scale=30):
+    """
+    Zero-point homogenization using pre-computed zero-point correction maps.
+    
+    This function applies spatial zero-point corrections to KMTNet images using
+    pre-computed correction maps. It homogenizes photometric zero-points across
+    the entire image by applying flux scaling factors derived from zero-point
+    variations, ensuring uniform photometric quality.
+    
+    Parameters
+    ----------
+    img : str
+        Path to the input KMTNet FITS image file. The function extracts field
+        and band information from the FITS header (FIELD1 and FILTER keywords).
+    path_map : str
+        Path to the directory containing zero-point correction maps:
+        - zp_map_{field}_{band}_{mode}_{aperture}.npy: Zero-point correction map
+        - zperr_map_{field}_{band}_{mode}_{aperture}.npy: Zero-point error map
+    outname : str
+        Path and filename for the output corrected image.
+    aperture : str, optional
+        Aperture type for zero-point correction ('APER5', 'APER3', 'AUTO', etc.).
+        Default is 'APER5'.
+    mode : str, optional
+        Correction mode for the zero-point map ('single', 'multi', etc.).
+        Default is 'single'.
+    zp_to_scale : float, optional
+        Target zero-point magnitude for scaling. Default is 30.0.
+    
+    Returns
+    -------
+    None
+        Results are written to the output FITS file.
+    
+    Notes
+    -----
+    The function performs the following operations:
+    
+    1. **Map Loading**:
+       - Loads zero-point correction map (zp_map) and error map (zperr_map)
+       - Maps are stored as NumPy arrays with spatial zero-point variations
+       - Maps are specific to field, band, mode, and aperture combination
+    
+    2. **Flux Scaling Calculation**:
+       - Calculates zero-point difference: del_zp = zp_to_scale - zp_map
+       - Converts to flux ratio: fratio = 10^(del_zp/2.5)
+       - Each pixel gets individual scaling factor based on local zero-point
+    
+    3. **Image Processing**:
+       - Upscales flux ratio map to match image dimensions
+       - Uses scipy.ndimage.zoom with linear interpolation
+       - Applies flux scaling to image data: data_scaled = data * fratio_upscaled
+    
+    4. **Header Updates**:
+       - Updates MAGZERO with target zero-point
+       - Adds EMAGZERO with average zero-point uncertainty
+       - Updates SATURATE and UNDERSAT with scaling factors
+       - Sets PHOTREF to 'GAIA DR3'
+    
+    5. **Output Generation**:
+       - Saves corrected image with updated headers
+       - Preserves original image structure and metadata
+    
+    Zero-point Correction Process
+    -----------------------------
+    - **Input**: Image with non-uniform zero-point across field
+    - **Correction**: Spatial flux scaling based on zero-point variations
+    - **Output**: Image with uniform zero-point (zp_to_scale)
+    - **Method**: Pixel-wise flux multiplication with correction factors
+    
+    Aperture Types Supported
+    ------------------------
+    - **FWHM**: Seeing size aperture
+    - **AUTO**: Kron-like aperture
+    - **APER3**: 3 arcsec aperture
+    - **APER5**: 5 arcsec aperture (default)
+    - **APER10**: 10 arcsec aperture
+    
+    Header Keywords Updated
+    -----------------------
+    - MAGZERO: Target zero-point magnitude
+    - EMAGZERO: Average zero-point uncertainty
+    - SATURATE: Updated saturation level (scaled)
+    - UNDERSAT: Updated undersaturation level (scaled)
+    - PHOTREF: Reference catalog used ('GAIA DR3')
+    
+    Examples
+    --------
+    >>> zeropoint_homogenization('/path/to/image.fits', '/path/to/maps/',
+    ...                          '/path/to/output.fits', aperture='APER5',
+    ...                          mode='single', zp_to_scale=30.0)
+    
+    See Also
+    --------
+    plot_phot_residue : Photometric quality assessment function
+    KMTNet_ToO_functions.zpscale : Zero-point scaling function
+    
+    Notes
+    -----
+    This function is typically used for reference image preparation, ensuring
+    uniform photometric quality across the entire field of view. The correction
+    maps should be pre-computed using photometric analysis of reference stars.
+    """
         
     from scipy.ndimage import zoom
 
