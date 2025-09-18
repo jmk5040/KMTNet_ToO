@@ -31,15 +31,15 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits'):
     print(f'Field/Tiling coordinate information referring to {field_info}.')
     
     # process managements
-    ampcompro   = False
-    astrompro   = False
-    astromqapro = False
-    zpscalepro  = False
-    bpmaskpro   = False
-    stackingpro = False
-    qa4stackpro = False
-    catalogpro  = False
-    subtpro     = False
+    ampcompro   = True
+    astrompro   = True
+    astromqapro = True
+    zpscalepro  = True
+    bpmaskpro   = True
+    stackingpro = True
+    qa4stackpro = True
+    catalogpro  = True
+    subtpro     = True
     rbclasspro  = True
 
     process_status = {
