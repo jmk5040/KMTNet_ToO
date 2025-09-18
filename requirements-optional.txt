@@ -1,0 +1,11 @@
+# Optional dependencies for KMTNet pipeline
+# Install with: pip install -r requirements-optional.txt
+
+# For cosmic ray rejection in ToO functions
+astroscrappy>=1.1.0
+
+# For machine learning features (if used)
+scikit-learn>=1.0.0
+
+# For Pan-STARRS reference image generation (fallback when KS4 unavailable)
+PanStitch>=1.0.0

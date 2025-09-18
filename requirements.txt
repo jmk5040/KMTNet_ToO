@@ -1,0 +1,18 @@
+# Core dependencies (required)
+numpy>=1.20.0
+astropy>=4.0.0
+matplotlib>=3.0.0
+scipy>=1.7.0
+astroquery>=0.4.0
+
+# Optional dependencies for specific features
+# Install with: pip install -r requirements-optional.txt
+
+# For cosmic ray rejection (used in ToO functions)
+# astroscrappy>=1.1.0
+
+# For machine learning features (if used)
+# scikit-learn>=1.0.0
+
+# For Pan-STARRS reference image generation (fallback when KS4 unavailable)
+# PanStitch>=1.0.0
