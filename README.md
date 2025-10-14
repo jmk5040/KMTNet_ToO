@@ -203,6 +203,27 @@ The pipeline includes comprehensive documentation:
 
 ## 🔧 Advanced Usage
 
+### 2D Zero-Point Calibration for KS4 DR1 Reference Images
+
+For 2-dimensional zero-point calibration of KS4 DR1 reference images, use the `zeropoint_homogenization` function in `KMTNet_REF_functions.py`. This function provides advanced spatial homogenization of photometric zero-points across the image field.
+
+#### Usage:
+```python
+from pipe.KMTNet_REF_functions import zeropoint_homogenization
+
+# Apply 2D zero-point correction
+zeropoint_homogenization(img='/path/to/reference_image.fits', 
+                        path_map='/path/to/correction_maps/', 
+                        outname='corrected_image.fits',
+                        aperture='APER5', 
+                        mode='single', 
+                        zp_to_scale=30)
+```
+
+#### Download Correction Maps:
+The required correction maps for KS4 DR1 reference images can be downloaded from:
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17336381.svg)](https://doi.org/10.5281/zenodo.17336381)
 ### Customizing the Pipeline
 The pipeline is designed to be highly customizable:
 - **Configuration Files**: Modify SExtractor, SCAMP, and SWarp parameters
