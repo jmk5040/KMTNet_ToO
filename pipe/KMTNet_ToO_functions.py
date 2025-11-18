@@ -91,8 +91,8 @@ def ampcom(path_data, path_cfg):
     KMTNet_ToO_pipeline : Main pipeline that calls this function
     """
     
-    import os
     import numpy as np
+    import os, shutil, re
     from pathlib import Path 
     import astropy.units as u
     from astropy.io import fits
@@ -115,6 +115,25 @@ def ampcom(path_data, path_cfg):
     data_rows = []
     # Loop over each file and extract the header data
     for frame in allframes:
+
+        # KMTNet image check (unimpaired)
+        pattern = r'kmt[asc]\.\d{8}\.\d{6}\.fits'
+        locations = {
+            "kmts"  : "SAAO",
+            "kmtc"  : "CTIO",
+            "kmta"  : "SSO"}
+        file_sizes = {
+            "SAAO"  : 1361664000,
+            "CTIO"  : 1361583360,
+            "SSO"   : 1361583360}
+
+        file_size = os.path.getsize(frame)
+        location = locations[os.path.basename(frame).split('.')[0]]
+        if file_size < file_sizes[location] or not re.match(pattern, os.path.basename(frame)):
+            shutil.move(frame, os.path.join(path_data, 'badccderror', os.path.basename(frame)))
+            print(f"Invalid file name {os.path.basename(frame)}. Skipping.")
+            continue
+        
         with fits.open(frame) as hdul:
             header = hdul[0].header
             # Collect the desired header values
