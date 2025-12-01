@@ -12,7 +12,18 @@ from config.working_directory_structure import *
 
 # Create all necessary directories for the pipeline
 # This ensures the directory structure exists before processing begins
-create_directories()
+paths = create_directories()
+path_cfg = paths['path_config']
+path_cat = paths['path_catalog']
+
+path_raw = paths['path_raw']
+path_scale = paths['path_scaled']
+path_stack = paths['path_stack']
+path_subt = paths['path_subt']
+path_tmpl = paths['path_tmpl']
+
+path_plot   = paths['path_plot']
+path_log    = paths['path_log']
 
 #%% KMTNet ToO Pipeline
 from astropy.io import fits

@@ -67,19 +67,29 @@ path_plot = PATHS['path_plot']
 path_log = PATHS['path_log']
 
 # STEP 5: Directory creation function
-def create_directories():
+def create_directories(verbose=False):
     """
     Create all necessary directories for the pipeline.
     
     This function ensures that all required directories exist before the pipeline runs.
     It's safe to call multiple times - existing directories won't cause errors.
     
+    Args:
+        verbose (bool): If True, print messages for each directory created. Default: False.
+    
+    Returns:
+        dict: Dictionary of all path variables (PATHS)
+    
     Usage:
-        create_directories()  # Creates all directories if they don't exist
+        paths = create_directories()  # Creates all directories and returns PATHS dict
+        create_directories(verbose=True)  # Creates directories with verbose output
     """
     for path_name, path_value in PATHS.items():
         os.makedirs(path_value, exist_ok=True)
-        print(f"Created directory: {path_value}")
+        if verbose:
+            print(f"Created directory: {path_value}")
+    
+    return PATHS
 
 if __name__ == "__main__":
     # Test the configuration
