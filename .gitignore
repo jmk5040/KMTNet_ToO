@@ -9,7 +9,6 @@ rbclass_kmtnet/
 *.png
 *.jpg
 *.npy
-*.pkl
 
 # Python cache files
 __pycache__/
