@@ -303,8 +303,7 @@ Distributed under the MIT License. See `LICENSE` for more information.
 
 If you use this pipeline in your research, please cite:
 
-**Jeong, M. et al. (in preparation)** - *KMTNet Synoptic Survey of Southern Sky II: Data Reduction Pipeline for Reference Imaging and Real-time Transient Detection*
-
+Jeong, M. et al. (2026) - KMTNet Synoptic Survey of Southern Sky II: Data Reduction and Real-Time Transient Detection Pipeline, arXiv:2603.17442 [astro-ph.IM]
 *Note: The full citation will be updated once the paper is published.*
 
 ## 👨‍💻 Maintainer
