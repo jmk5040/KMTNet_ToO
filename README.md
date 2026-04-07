@@ -16,14 +16,19 @@ The KMTNet ToO Pipeline is a sophisticated astronomical data processing system t
 - **Source Classification**: Multi-flag filtering system to minimize false positives
 
 ## ✨ Key Features
+- Robust Quality Control: Real-time identification and filtering of readout errors and tracking artifacts to ensure data integrity from the start.
 
-- **🚀 Real-Time Processing**: Rapid reduction and analysis optimized for time-critical observations
-- **🔧 Automated Calibration**: Complete astrometric alignment and photometric zero-point scaling
-- **🎯 Transient Identification**: Advanced image subtraction methods optimized for KMTNet's unique characteristics
-- **🛡️ Quality Control**: Comprehensive 10-flag filtering system for reliable transient detection
-- **📊 Comprehensive Documentation**: Detailed docstrings and inline documentation for all functions
-- **🌐 Multi-Site Support**: Handles observations from all three KMTNet sites (CTIO, SAAO, SSO)
-- **📈 Scalable Architecture**: Modular design allowing easy customization and extension
+- Precision Astrometry & QA: High-accuracy alignment across the entire field of view using SCAMP integrated with the Gaia reference catalog.
+
+- Photometric Calibration: Advanced mitigation of zero-point systematics and cross-field homogenization for consistent flux measurements.
+
+- Artifact & Pixel Masking: Automated generation of comprehensive bad-pixel maps to neutralize cross-talk, pixel bleeding, and other detector-level defects.
+
+- Optimized Image Stacking: Seamless construction of deep co-added science and mask images, re-projected to predefined field coordinates.
+
+- Difference Image Analysis (DIA): State-of-the-art subtraction engine utilizing science and reference frames to detect transients via photometric parameters and Machine Learning classifiers.
+
+- Multi-Site Integration: Fully scalable architecture designed to handle and synchronize observations across all three KMTNet sites (CTIO, SAAO, and SSO).
 
 ## 🔄 Pipeline Workflow
 
