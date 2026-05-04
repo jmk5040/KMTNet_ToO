@@ -836,22 +836,24 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
             from numpy import sqrt
             return(round(float(sqrt(mean(ls**2))), 5))
     # ====== NESTED FUNCTIONS =================================================
-    def bleed_masking(datapath, skysigcut=1.5, convergence=5, bpidx_thres=3000, saturate=52000, flagval=4):
-        
+    def bleed_masking(datapath,  bleeding_thres=50000, BI_thres=500, detect_thres=0.4, CL=6, flagval=4):
+
+        import os
         import numpy as np
         from astropy.stats import sigma_clipped_stats
         from astropy.io import fits
-        
+
         Msg.bleedmap()
         hdul    = fits.open(datapath)
         data    = hdul[0].data
         hdr     = hdul[0].header
         leny, lenx = data.shape
-        bpMask = np.zeros_like(data)
+        bleeding_mask = np.zeros_like(data)
         _, med, sig = sigma_clipped_stats(data)
-        signal_thres = med + skysigcut * sig
+        signal_thres = med + detect_thres * sig
 
         chip    = os.path.basename(datapath).split(".")[1]
+
         # Determine the direction of masking based on the chip type
         if chip in ['kk', 'nn']:
             direction = 'downward'
@@ -862,10 +864,10 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
 
         for i in range(lenx):
             col = data[:, i]
-            sat_indices = np.where(col > saturate)[0]
+            sat_indices = np.where(col > bleeding_thres)[0]
 
             for y_idx in sat_indices:
-                if bpMask[y_idx, i] == flagval:
+                if bleeding_mask[y_idx, i] == flagval:
                     continue  # Skip already marked pixels
 
                 # Calculate the sum of pixel values in the vicinity to determine if there is actual bleeding
@@ -879,8 +881,8 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
                 if ystart < yend:
                     bpidx = np.sum(data[ystart:yend+1, i])
                     ylength = yend - ystart + 1
-                    if bpidx - med * ylength > bpidx_thres:
-                        bpMask[y_idx, i] = flagval  # Set mask only if the condition is met
+                    if bpidx - med * ylength > BI_thres:
+                        bleeding_mask[y_idx, i] = flagval  # Set mask only if the condition is met
                         revert_pixel = 0
 
                         # Define scanning range based on direction
@@ -889,23 +891,23 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
                         # Scan through the column in the specified direction
                         for j in range(range_start, range_end, step):
                             if col[j] > signal_thres:
-                                bpMask[j, i] = flagval
+                                bleeding_mask[j, i] = flagval
                                 revert_pixel = 0
                             else:
-                                bpMask[j, i] = flagval
+                                bleeding_mask[j, i] = flagval
                                 revert_pixel += 1
 
                             # Stop marking when enough consecutive small values are found
-                            if revert_pixel >= convergence:
+                            if revert_pixel >= CL:
                                 if direction == 'downward':
-                                    end_idx = max(j - convergence, 0)
+                                    end_idx = max(j - CL, 0)
                                 else:
-                                    end_idx = min(j + convergence, leny)
-                                bpMask[j:end_idx, i] = 0
+                                    end_idx = min(j + CL, leny)
+                                bleeding_mask[j:end_idx, i] = 0
                                 break
         # Save the mask
-        # fits.PrimaryHDU(data=bpMask, header=hdr).writeto(datapath.replace('.fits', '.bmask.fits'), overwrite=True)
-        return bpMask
+        # fits.PrimaryHDU(data=bleeding_mask, header=hdr).writeto(datapath.replace('.fits', '.bmask.fits'), overwrite=True)
+        return bleeding_mask
     # -------------------------------------------------------------------------
     def crmap(fname, ction=False, bleedreject=False) :
 
