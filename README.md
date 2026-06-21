@@ -46,9 +46,18 @@ The pipeline follows a systematic approach to process KMTNet images from raw dat
 
 ### 3. **Astrometric Calibration (`astrom`)**
    - Runs SExtractor to detect sources in each chip image
-   - Uses SCAMP for astrometric solution with GAIA/UCAC-4 reference catalogs
    - Applies TPV (Tangent Plane) projection for accurate coordinate transformation
-   - Iterative threshold adjustment for optimal astrometric precision
+   - **Reference catalog**: prefers the local **Gaia-XP** catalogue (`catalog/gaiaxp/`,
+     converted to FITS-LDAC on the fly), which works fully offline and is better
+     centred on the Gaia frame than UCAC-4; UCAC-4 (via network) is used only as a
+     fallback when no local Gaia-XP catalogue exists for the field
+   - **Initial-guess (`.ahead`) recovery**: the static per-site/per-chip global
+     header is tried first; if SCAMP fails to converge (raising the detection
+     threshold no longer helps), it automatically retries seeded with the
+     **most-recent successful solution of the same observatory+chip** (cached under
+     `config/ahead/lastgood/`, reusing its CD/CRPIX/distortion while keeping the
+     frame's own pointing). Tunable via `astrom_rms_max`, `neighbour_fallback`,
+     and `neighbour_max_age_days`
 
 ### 4. **Quality Assurance (`qatest`)**
    - Comprehensive quality assessment for each individual image

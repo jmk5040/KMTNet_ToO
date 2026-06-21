@@ -17,3 +17,6 @@ __pycache__/
 *.pyd
 .Python
 *.so
+
+# astrometry neighbour-ahead runtime cache
+config/ahead/lastgood/

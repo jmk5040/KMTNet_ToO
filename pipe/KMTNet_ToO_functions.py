@@ -317,7 +317,8 @@ def ampcom(path_data, path_cfg):
     
     return 0
 #%% ToOAstrometry.py
-def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet_grid.fits'):
+def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet_grid.fits',
+           astrom_rms_max=1e-4, neighbour_fallback=True, neighbour_max_age_days=3.0):
     """
     Astrometric calibration of KMTNet chip images using SCAMP.
     
@@ -415,7 +416,45 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
     # so a trailing separator must be guaranteed even when the path config omits it.
     if not path_cfg.endswith('/'):
         path_cfg    = path_cfg + '/'
-    
+
+    import time
+
+    # ------------------------------------------------------------------ #
+    # Neighbour-ahead recovery helpers.
+    # When the static (global) initial-guess header fails to converge, SCAMP
+    # is retried seeded with the most-recent successful solution of the same
+    # observatory+chip (its CD/CRPIX/PV terms, while the frame keeps its own
+    # CRVAL). The seed is persisted under config/ahead/lastgood/ so it can
+    # rescue sibling frames within a run and across recent runs.
+    # ------------------------------------------------------------------ #
+    _AHEAD_KEEP = ('EQUINOX', 'RADESYS', 'CTYPE1', 'CTYPE2', 'CUNIT1', 'CUNIT2',
+                   'CRPIX1', 'CRPIX2', 'CD1_1', 'CD1_2', 'CD2_1', 'CD2_2')
+
+    def _cache_lastgood_ahead(head_path, out_path):
+        """Distil a solved SCAMP header into a reusable .ahead seed (no CRVAL)."""
+        with open(head_path, 'r', encoding='latin-1') as fh:
+            txt = fh.read().encode('ascii', 'ignore').decode('ascii')
+        src = fits.Header.fromstring(txt, sep='\n')
+        seed = fits.Header()
+        for kk in _AHEAD_KEEP:
+            if kk in src:
+                seed[kk] = src[kk]
+        for kk in src:
+            if kk.startswith('PV1_') or kk.startswith('PV2_'):
+                seed[kk] = src[kk]
+        if 'CD1_1' not in seed:        # nothing usable -> do not cache
+            return False
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        seed.totextfile(out_path, overwrite=True)
+        return True
+
+    def _ahead_is_fresh(path, max_age_days):
+        if not os.path.isfile(path):
+            return False
+        if max_age_days is None:
+            return True
+        return (time.time() - os.path.getmtime(path)) <= max_age_days * 86400.0
+
     fits_files = sorted(Path(path_data).glob('kmt*.fits'))
 
     # Initialize a list to hold all the header information
@@ -497,61 +536,80 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
             cfg         = os.path.join(path_cfg, 'kmtnet.sex')
             conv        = os.path.join(path_cfg, 'kmtnet.conv')
             nnw         = os.path.join(path_cfg, 'kmtnet.nnw')
-            
-            thresh = ithresh
-            repeat = 0
+            outhdr      = f'{path_data}{serial}.{chip}.astrom.head'
 
-            while 1:
+            # Observatory-specific static (global) initial-guess header.
+            site = name[i][3]
+            if   site == 'a': default_ahead = f'{path_cfg}ahead/kmtnet_global_sso.{chip}.ahead'   # SSO  (Australia)
+            elif site == 's': default_ahead = f'{path_cfg}ahead/kmtnet_global.{chip}.ahead'        # SAAO (South Africa)
+            else:             default_ahead = f'{path_cfg}ahead/kmtnet_global_ctio.{chip}.ahead'   # CTIO (Chile)
 
-                sexcom  = f'source-extractor {path_data}{serial}.{chip}.fits -c {cfg} -CATALOG_NAME {catname} -PARAMETERS_NAME {param} -FILTER_NAME {conv} -STARNNW_NAME {nnw} -CATALOG_TYPE FITS_LDAC -HEADER_SUFFIX NONE -DETECT_THRESH {thresh} -ANALYSIS_THRESH {thresh} -SATUR_LEVEL 60000.0'
-                
-                if name[i][3] == 'a': ahead = f'{path_cfg}ahead/kmtnet_global_sso.{chip}.ahead' #Austrailia
-                if name[i][3] == 's': ahead = f'{path_cfg}ahead/kmtnet_global.{chip}.ahead' #South Africa
-                if name[i][3] == 'c': ahead = f'{path_cfg}ahead/kmtnet_global_ctio.{chip}.ahead' #Chile
+            # Reference catalogue: prefer the local Gaia-XP catalogue (works
+            # offline and is better centred on the Gaia frame than UCAC-4);
+            # fall back to UCAC-4 (network) only when no local catalogue exists.
+            centcoord   = SkyCoord(ra[i], dec[i], unit=(u.hourangle, u.deg))
+            try:
+                kmtgrid     = Table.read(os.path.join(path_cfg, gridcat), format='fits')
+            except Exception:
+                kmtgrid     = Table.read(os.path.join(path_cfg, gridcat), format='ascii')
+            kmtcoord    = SkyCoord(kmtgrid['ra[deg]'], kmtgrid['dec[deg]'], unit='deg')
+            trgt_field  = kmtgrid[centcoord.separation(kmtcoord).argmin()]
+            gaiacat     = os.path.join(path_cat, 'gaiaxp', f'gaiaxp_{str(trgt_field["field_name1"]).zfill(4)}.fits')
 
-                centcoord   = SkyCoord(ra[i], dec[i], unit=(u.hourangle, u.deg))
-                try:
-                    kmtgrid     = Table.read(os.path.join(path_cfg, gridcat), format='fits')
-                except:
-                    kmtgrid     = Table.read(os.path.join(path_cfg, gridcat), format='ascii')
-                kmtcoord    = SkyCoord(kmtgrid['ra[deg]'], kmtgrid['dec[deg]'], unit='deg')
-                trgt_field  = kmtgrid[centcoord.separation(kmtcoord).argmin()]
-                
-                # load the reference catalog (GAIA)
-                
-                gaiacat = os.path.join(path_cat, 'gaiaxp', f'gaiaxp_{str(trgt_field["field_name1"]).zfill(4)}.fits')
-                if os.path.exists(gaiacat) and centcoord.separation(kmtcoord).min().value < 0:
-                    """
-                    TODO: Now in fix. Gaia catalog is not used.
-                    Instead, we use the UCAC-4 catalog.
-                    """
-                    gaialdac     = gaiacat.replace(".fits", "_ldac.fits")
-                    if not os.path.exists(gaialdac):
-                        create_ldac_fits(gaiacat, gaialdac, center=centcoord, radius=radius)
+            if os.path.exists(gaiacat):
+                gaialdac = gaiacat.replace('.fits', '_ldac.fits')
+                if not os.path.exists(gaialdac):
+                    create_ldac_fits(gaiacat, gaialdac, center=centcoord, radius=max(radius, 1.5))
+                refargs = f'-ASTREF_CATALOG FILE -ASTREFCAT_NAME {gaialdac}'
+            else:
+                print(f'Local Gaia-XP catalogue not found for field {trgt_field["field_name1"]}; falling back to UCAC-4 (requires network).')
+                refargs = '-ASTREF_CATALOG UCAC-4'
 
-                    scampcom = f'scamp {catname} -c {os.path.join(path_cfg, "kmtnet.scamp")} -ASTREF_CATALOG FILE -ASTREFCAT_NAME {gaialdac} -POSITION_MAXERR 20.0 -CROSSID_RADIUS 5.0 -DISTORT_DEGREES 3 -PROJECTION_TYPE TPV -AHEADER_GLOBAL {ahead} -STABILITY_TYPE INSTRUMENT'
-                else:
-                    print(f"Closest Separation: {centcoord.separation(kmtcoord).min().value:.2f} deg")
-                    scampcom = f'scamp {catname} -c {os.path.join(path_cfg, "kmtnet.scamp")} -ASTREF_CATALOG UCAC-4 -POSITION_MAXERR 20.0 -CROSSID_RADIUS 5.0 -DISTORT_DEGREES 3 -PROJECTION_TYPE TPV -AHEADER_GLOBAL {ahead} -STABILITY_TYPE INSTRUMENT'
-                
-                # Run SExtractor and SCAMP
-                print(sexcom)
+            # Recovery ladder:
+            #   (1) static global ahead, raising DETECT_THRESH a few times;
+            #   (2) if still failing, retry seeded with the most-recent good
+            #       same-site/same-chip solution (the "neighbour" ahead).
+            lastgood_ahead = os.path.join(path_cfg, 'ahead', 'lastgood', f'{site}.{chip}.ahead')
+            current_ahead  = default_ahead
+            thresh, repeat, tried_neighbour = ithresh, 0, False
+
+            while True:
+
+                sexcom   = f'source-extractor {path_data}{serial}.{chip}.fits -c {cfg} -CATALOG_NAME {catname} -PARAMETERS_NAME {param} -FILTER_NAME {conv} -STARNNW_NAME {nnw} -CATALOG_TYPE FITS_LDAC -HEADER_SUFFIX NONE -DETECT_THRESH {thresh} -ANALYSIS_THRESH {thresh} -SATUR_LEVEL 60000.0'
+                scampcom = f'scamp {catname} -c {os.path.join(path_cfg, "kmtnet.scamp")} {refargs} -POSITION_MAXERR 20.0 -CROSSID_RADIUS 5.0 -DISTORT_DEGREES 3 -PROJECTION_TYPE TPV -AHEADER_GLOBAL {current_ahead} -STABILITY_TYPE INSTRUMENT'
+
                 os.system(sexcom)
-                print(scampcom)
-                outhdr  = f'{path_data}{serial}.{chip}.astrom.head'
                 if os.path.exists(outhdr):
-                    os.remove(outhdr) # if previous header file exists, remove it
+                    os.remove(outhdr)  # drop any previous solution
                 os.system(scampcom)
-                rms1 = float(read_header(outhdr).get('ASTRRMS1', 0))
-                rms2 = float(read_header(outhdr).get('ASTRRMS2', 0))
-                if (rms1 > 1e-4 or rms2 > 1e-4) and repeat <= 3: 
-                    print(f'Warning: High RMS for {path_data}{serial}.{chip}.fits (iteration: {repeat})')
+
+                rms1 = float(read_header(outhdr).get('ASTRRMS1', 0) or 0)
+                rms2 = float(read_header(outhdr).get('ASTRRMS2', 0) or 0)
+                solved = os.path.exists(outhdr) and (0 < rms1 <= astrom_rms_max) and (0 < rms2 <= astrom_rms_max)
+
+                if solved:
+                    # Persist this good solution as a seed for sibling frames.
+                    try:
+                        _cache_lastgood_ahead(outhdr, lastgood_ahead)
+                    except Exception as e:
+                        print(f'(could not cache last-good ahead for {site}.{chip}: {e})')
+                    break
+
+                if repeat < 3:
+                    print(f'Warning: poor astrometry for {serial}.{chip} (rms={rms1:.2e},{rms2:.2e}); raising threshold (iteration {repeat + 1}).')
                     thresh += 10
                     repeat += 1
-                else:
-                    thresh = ithresh
-                    repeat = 0
-                    break
+                    continue
+
+                if neighbour_fallback and (not tried_neighbour) and (current_ahead != lastgood_ahead) \
+                        and _ahead_is_fresh(lastgood_ahead, neighbour_max_age_days):
+                    print(f'*** {serial}.{chip}: global ahead failed; retrying with most-recent good neighbour seed ({lastgood_ahead}). ***')
+                    current_ahead = lastgood_ahead
+                    thresh, repeat, tried_neighbour = ithresh, 0, True
+                    continue
+
+                print(f'*** {serial}.{chip}: astrometry did not converge (rms={rms1:.2e},{rms2:.2e}). ***')
+                break
 
         skyarr  = [skykk[i], skymm[i], skytt[i], skynn[i]]
         fwhmarr = [fwhm1kk[i], fwhm1mm[i], fwhm1tt[i], fwhm1nn[i]]
@@ -563,14 +621,16 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
             
             inhdr = f"{path_data}{serial}.{chip}.astrom.head"
             if os.path.exists(inhdr):
-                f=open(inhdr,'r')
-                lines=f.readlines()
-                f.close()
+                # SCAMP headers can contain non-ASCII bytes (e.g. in COMMENT/
+                # HISTORY cards); read tolerantly and rewrite clean ASCII so the
+                # downstream fits.Header.fromtextfile() never chokes.
+                with open(inhdr, 'r', encoding='latin-1') as f:
+                    lines = f.readlines()
 
-                f=open(inhdr,'w')
-                lines[1]=lines[1][0:37]+'\n'
-                for line in lines[0:gap] : f.write(line)
-                f.close()
+                lines[1] = lines[1][0:37] + '\n'
+                with open(inhdr, 'w', encoding='ascii') as f:
+                    for line in lines[0:gap]:
+                        f.write(line.encode('ascii', 'ignore').decode('ascii'))
                 
                 hdr     = fits.getheader(f"{path_data}{serial}.{chip}.fits")
                 hdu     = hdr.fromtextfile(inhdr)
