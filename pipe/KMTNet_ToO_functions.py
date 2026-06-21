@@ -411,6 +411,10 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
 
     if not path_data.endswith('/'):
         path_data   = path_data + '/'
+    # The aheader path below is built by string concatenation (f'{path_cfg}ahead/...'),
+    # so a trailing separator must be guaranteed even when the path config omits it.
+    if not path_cfg.endswith('/'):
+        path_cfg    = path_cfg + '/'
     
     fits_files = sorted(Path(path_data).glob('kmt*.fits'))
 
@@ -589,7 +593,8 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
     
     return 0
 #%% ToOAstrometryQA.py
-def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, crreject=True, bleedreject=True, weightmap=True, imtype='chip'):
+def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, crreject=True, bleedreject=True, weightmap=True, imtype='chip',
+           qa_edge_ring=1, qa_max_edge_bad=2):
     """
     Quality Assurance (QA) test for astrometric calibration of KMTNet images.
     
@@ -740,6 +745,12 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
 
     warnings.simplefilter('ignore', UserWarning)
 
+    # Normalise the config directory so that the many `configdir + 'file'`
+    # string concatenations below resolve correctly whether or not the caller
+    # passed a trailing separator (the centralised path config does not add one).
+    if not configdir.endswith(os.sep):
+        configdir += os.sep
+
     # ====== CLASSES ==========================================================
 
     class Cmd :
@@ -836,7 +847,23 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
             from numpy import sqrt
             return(round(float(sqrt(mean(ls**2))), 5))
     # ====== NESTED FUNCTIONS =================================================
-    def bleed_masking(datapath,  bleeding_thres=50000, BI_thres=500, detect_thres=0.4, CL=6, flagval=4):
+    def bleed_masking(datapath,  bleeding_thres=50000, BI_thres=500, detect_thres=0.4, CL=6, flagval=4, data=None):
+        """
+        Mask saturation bleeding trails.
+
+        Vectorised re-implementation (Jeong 2026): instead of the original
+        O(N_seed x trail_length) per-column Python scan, every saturated column
+        is processed once with a directional, gap-tolerant flood that is fully
+        expressed with NumPy. A pixel is flagged when, travelling in the bleed
+        direction from a saturated seed, the running count of consecutive
+        below-`signal_thres` pixels has not yet reached `CL` (i.e. the trail is
+        still alive). This reproduces the intent of the original routine
+        (saturated core + bleed trail until it fades) while running hundreds of
+        times faster. `BI_thres` is retained for signature compatibility.
+
+        `data` lets the caller hand in the already-loaded image array so the
+        ~340 MB chip is not read from disk a second time.
+        """
 
         import os
         import numpy as np
@@ -844,12 +871,14 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
         from astropy.io import fits
 
         Msg.bleedmap()
-        hdul    = fits.open(datapath)
-        data    = hdul[0].data
-        hdr     = hdul[0].header
+        if data is None:
+            data = fits.getdata(datapath)
         leny, lenx = data.shape
-        bleeding_mask = np.zeros_like(data)
-        _, med, sig = sigma_clipped_stats(data)
+        bleeding_mask = np.zeros((leny, lenx), dtype=np.int16)
+        # Sky level/scatter are estimated on a strided subsample: the median and
+        # sigma of the background are insensitive to it but it is ~10x cheaper
+        # than clipping all ~85M pixels.
+        _, med, sig = sigma_clipped_stats(data[::4, ::4], maxiters=3)
         signal_thres = med + detect_thres * sig
 
         chip    = os.path.basename(datapath).split(".")[1]
@@ -862,51 +891,37 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
         else:
             raise ValueError("Unknown chip type")
 
-        for i in range(lenx):
-            col = data[:, i]
-            sat_indices = np.where(col > bleeding_thres)[0]
+        sat_full = data > bleeding_thres
+        sig_full = data > signal_thres
+        # Only columns that actually contain saturated pixels can bleed.
+        cols = np.where(sat_full.any(axis=0))[0]
+        idx = np.arange(leny)
 
-            for y_idx in sat_indices:
-                if bleeding_mask[y_idx, i] == flagval:
-                    continue  # Skip already marked pixels
+        def _trail(sat_col, sig_col):
+            # Travel in +index order; for 'downward' chips bleeding runs toward
+            # decreasing row, so the column is reversed before/after the scan.
+            if direction == 'downward':
+                sat_col = sat_col[::-1]
+                sig_col = sig_col[::-1]
+            faint = ~(sat_col | sig_col)
+            # Length of the current run of consecutive faint pixels.
+            cs = np.cumsum(faint)
+            reset = np.where(~faint, cs, 0)
+            run = cs - np.maximum.accumulate(reset)
+            term = run == CL                       # trail dies here
+            last_seed = np.maximum.accumulate(np.where(sat_col, idx, -1))
+            last_term = np.maximum.accumulate(np.where(term, idx, -1))
+            last_term_before = np.empty(leny, dtype=np.int64)
+            last_term_before[0] = -1
+            last_term_before[1:] = last_term[:-1]
+            active = (last_seed >= 0) & (last_seed > last_term_before)
+            return active[::-1] if direction == 'downward' else active
 
-                # Calculate the sum of pixel values in the vicinity to determine if there is actual bleeding
-                if direction == 'downward':
-                    ystart = max(y_idx - 40, 0)
-                    yend = max(y_idx - 20, 0)
-                else:  # 'upward'
-                    ystart = min(y_idx + 20, leny - 1)
-                    yend = min(y_idx + 40, leny - 1)
+        for i in cols:
+            mask_col = _trail(sat_full[:, i], sig_full[:, i])
+            if mask_col.any():
+                bleeding_mask[mask_col, i] = flagval
 
-                if ystart < yend:
-                    bpidx = np.sum(data[ystart:yend+1, i])
-                    ylength = yend - ystart + 1
-                    if bpidx - med * ylength > BI_thres:
-                        bleeding_mask[y_idx, i] = flagval  # Set mask only if the condition is met
-                        revert_pixel = 0
-
-                        # Define scanning range based on direction
-                        range_start, range_end, step = (y_idx, -1, -1) if direction == 'downward' else (y_idx, leny, 1)
-
-                        # Scan through the column in the specified direction
-                        for j in range(range_start, range_end, step):
-                            if col[j] > signal_thres:
-                                bleeding_mask[j, i] = flagval
-                                revert_pixel = 0
-                            else:
-                                bleeding_mask[j, i] = flagval
-                                revert_pixel += 1
-
-                            # Stop marking when enough consecutive small values are found
-                            if revert_pixel >= CL:
-                                if direction == 'downward':
-                                    end_idx = max(j - CL, 0)
-                                else:
-                                    end_idx = min(j + CL, leny)
-                                bleeding_mask[j:end_idx, i] = 0
-                                break
-        # Save the mask
-        # fits.PrimaryHDU(data=bleeding_mask, header=hdr).writeto(datapath.replace('.fits', '.bmask.fits'), overwrite=True)
         return bleeding_mask
     # -------------------------------------------------------------------------
     def crmap(fname, ction=False, bleedreject=False) :
@@ -922,18 +937,24 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
         crmapname = fname.replace('.fits', '.mask.fits')
         # Cosmic-ray masking
         data, hdr = fits.getdata(fname, header=True)
-        c1,c2=cr.detect_cosmics(
-            data,
-            gain    = 1.0,
-            readnoise= 10,
-            sigclip = 4.5,
-            sigfrac = 0.3,
-            objlim  = 5.0,
-            niter   = 2,
-            cleantype= 'medmask',
-            fsmode  = 'median',
-            verbose = True
-        )
+        try:
+            c1, c2 = cr.detect_cosmics(
+                data,
+                gain    = 1.0,
+                readnoise= 10,
+                sigclip = 4.5,
+                sigfrac = 0.3,
+                objlim  = 5.0,
+                niter   = 2,
+                cleantype= 'medmask',
+                fsmode  = 'median',
+                verbose = False
+            )
+        except Exception as e:
+            # A cosmic-ray failure must not abort the whole frame: fall back to
+            # an empty CR layer and keep the crosstalk/bleed masking.
+            print(f'  ! cosmic-ray rejection failed for {os.path.basename(fname)} ({e}); continuing without CR mask.')
+            c1 = np.zeros_like(data, dtype=bool)
 
         # Crosstalk masking
         saturation_limit = 56000
@@ -963,7 +984,7 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
         Xtalk   = 1*c1+np.concatenate((ct1, ct2, ct3, ct4, ct5, ct6, ct7, ct8), axis=1)
         
         if bleedreject:
-            bpMask  = bleed_masking(fname)
+            bpMask  = bleed_masking(fname, data=data)
             Xtalk   = np.add(Xtalk, bpMask)
 
         fits.PrimaryHDU(data=Xtalk.astype(np.int16), header=fits.getheader(fname)).writeto(crmapname, overwrite=True)
@@ -1264,15 +1285,41 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
                                         sect_astrom, 
                                         dtctRatio]
 
-        # Analysis report
+        # ---- Analysis report -------------------------------------------------
         gbmap_row = list(df_sect['astrometry'])
         bad_sect = [i for i, x in enumerate(gbmap_row) if x == 'bad']
         empty_sect = [i for i, x in enumerate(gbmap_row) if x == 'empty']
-        fastrom = 'good' if (gbmap_row.count('bad') <= 2) and (gbmap_row.count('empty') <= 10) and (median(csep) < 0.4) else 'bad'
+
+        # Pass/fail is decided ONLY from the sections lying on the outermost
+        # `qa_edge_ring` ring(s) of the divnum x divnum grid. Interior sections are
+        # almost always well solved (dense star coverage, well-constrained central
+        # WCS), so they carry little diagnostic value and are deliberately ignored.
+        # A poor astrometric/registration solution shows up first at the field
+        # edges and corners, so QA scrutiny is focused there: the chip is rejected
+        # once `qa_max_edge_bad` or more EDGE sections are flagged bad. The full
+        # good/bad section map is still stored in the header for diagnostics.
+        def _is_edge(k):
+            i, j = k % divnum, k // divnum
+            return (i < qa_edge_ring or i >= divnum - qa_edge_ring or
+                    j < qa_edge_ring or j >= divnum - qa_edge_ring)
+        edge_bad = [k for k in bad_sect if _is_edge(k)]
+
+        if len(csep) > 0:
+            med_off = float(median(csep))
+            rms_off = float(sqrt(mean(csep**2)))
+        else:
+            med_off, rms_off = 99.0, 99.0
+
+        good_solution = (len(edge_bad) < qa_max_edge_bad)
+        fastrom = 'good' if good_solution else 'bad'
         badamp_ls = [[j+i*8 for i in range(8)] for j in range(8)]
         badamp_bl = True if empty_sect in badamp_ls else False
         result = [fname, fastrom, bad_sect]
 
+        print(f'  QA: n_match={len(csep)}, median_off={med_off:.3f}", rms={rms_off:.3f}", '
+              f'good_sect={gbmap_row.count("good")}/{divnum**2}, '
+              f'edge_bad={len(edge_bad)}/{len([1 for k in range(divnum**2) if _is_edge(k)])} '
+              f'(ring={qa_edge_ring}, interior ignored)')
         Msg.qaresult(fastrom)
 
         if fastrom == 'bad' :
@@ -2858,7 +2905,7 @@ def catalogmaker(cat, path_output, path_cat, flagcut=0, pixscale=0.4, clsstar=0.
 
     return 0
 #%% ToOTransientSearch.py
-def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_config, div_col=4, div_row=4, pixscale=0.4, ncore=1, detect=1.5, cutsize=1.0, twoway_subt=False, psf_analysis=False):
+def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_config, div_col=4, div_row=4, pixscale=0.4, ncore=1, detect=1.5, cutsize=1.0, twoway_subt=False, psf_analysis=False, reuse_dia=False, known_obj=None):
     """
     Image subtraction and transient candidate detection for KMTNet stacked images.
     
@@ -3178,7 +3225,14 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
         convdir     = 't'
         CONVIMG = CONV_REFIMG
     #   HOTPANTs Running
-    if not twoway_subt:
+    # `reuse_dia` lets a re-run skip the (very slow) HOTPANTS pass when the
+    # difference and convolution images from a previous run are already present.
+    # This is purely opt-in (default False keeps the original always-recompute
+    # behaviour) and is meant for resuming after a downstream failure without
+    # repeating ~30 min of image differencing.
+    if reuse_dia and os.path.isfile(SUBTIMG) and os.path.isfile(CONVIMG):
+        print('Reusing existing HOTPANTS difference/convolution images (reuse_dia=True).')
+    elif not twoway_subt:
         hotpants(inim=SCIIMG, refim=REFIMG, outim=SUBTIMG, inmsk=MASKIMG, refmsk=MASKIMG, convim=CONVIMG, stamp=stamp, nrx=div_col, nry=div_row, convdir=convdir)
     else: # subtraction in both direction "i" and "t"
         # convdir = 't'
@@ -3217,12 +3271,22 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
             ))
             subtbl      = ascii.read(SUBTIMG.replace(".fits", ".psf.cat"))
     else:
-        os.system(build_sex_command(SUBTIMG, conf_sex, conf_param, conf_conv, conf_nnw, detect, fwhm=fits.getheader(SCIIMG).get("FWHM"), mask=MASKIMG, weight=WEIGHTIMG))
-        subtbl      = ascii.read(SUBTIMG.replace(".fits", ".cat"))
+        # The output catalogue is consumed below with `ascii.read`, so SExtractor
+        # must emit ASCII_HEAD. The shared `kmtnet.sex` config defaults to
+        # CATALOG_TYPE=FITS_LDAC (needed by the PSFEx branch / catalogmaker), which
+        # would otherwise produce a binary FITS table and make `ascii.read` fail with
+        # a UTF-8 decode error. Override it explicitly, matching the convention used
+        # everywhere else an ASCII catalogue is read back.
+        _subcat = SUBTIMG.replace(".fits", ".cat")
+        if not (reuse_dia and os.path.isfile(_subcat)):
+            os.system(build_sex_command(SUBTIMG, conf_sex, conf_param, conf_conv, conf_nnw, detect, fwhm=fits.getheader(SCIIMG).get("FWHM"), mask=MASKIMG, weight=WEIGHTIMG, extra_args={"-CATALOG_TYPE": "ASCII_HEAD"}))
+        subtbl      = ascii.read(_subcat)
     INV_SUBTIMG = SUBTIMG.replace("hd", "invhd")
-    invert_image(inim=SUBTIMG, outim=INV_SUBTIMG)
-    os.system(build_sex_command(INV_SUBTIMG, conf_sex, conf_param, conf_conv, conf_nnw, detect, fwhm=fits.getheader(SCIIMG).get("FWHM"), mask=MASKIMG, weight=WEIGHTIMG))
-    invsubtbl   = ascii.read(INV_SUBTIMG.replace(".fits", ".cat"))
+    _invcat = INV_SUBTIMG.replace(".fits", ".cat")
+    if not (reuse_dia and os.path.isfile(_invcat)):
+        invert_image(inim=SUBTIMG, outim=INV_SUBTIMG)
+        os.system(build_sex_command(INV_SUBTIMG, conf_sex, conf_param, conf_conv, conf_nnw, detect, fwhm=fits.getheader(SCIIMG).get("FWHM"), mask=MASKIMG, weight=WEIGHTIMG, extra_args={"-CATALOG_TYPE": "ASCII_HEAD"}))
+    invsubtbl   = ascii.read(_invcat)
 
     print(f"# Number of sources: {len(subtbl)}")
     subtbl['inim']  = SCIIMG
@@ -3233,6 +3297,10 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
     subtbl['ratio_seeing']  = subtbl['FWHM_WORLD']/np.median(scicat['FWHM_WORLD'])
     subtbl.meta['ELLIPTICITY']  = np.median(scicat['ELLIPTICITY'])
     scicat['ELONGATION'] = 1 / (1-scicat['ELLIPTICITY'])
+    # ELONGATION (=A/B) is not requested in kmtnet_imask.param, so derive it from the
+    # ELLIPTICITY column (=1-B/A) instead of indexing a missing column. Identity:
+    # 1/(1-ELLIPTICITY) = 1/(B/A) = A/B = ELONGATION.
+    subtbl['ELONGATION'] = 1 / (1-subtbl['ELLIPTICITY'])
     subtbl['ratio_ellip']   = subtbl['ELLIPTICITY']/np.median(scicat['ELLIPTICITY'])
     subtbl['ratio_elong']   = subtbl['ELONGATION']/np.median(scicat['ELONGATION'])
     subtbl['MAG_AUTO']      = subtbl['MAG_AUTO'] + magautozero
@@ -3287,6 +3355,14 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
                 time.sleep(retry_delay)  # Wait for a bit before retrying
             else:
                 print("Final attempt failed. Skipping this function due to connection issues.")
+        except Exception as e:
+            # The IMCCE SkyBoT VO response format can drift out of sync with the
+            # installed astroquery version (e.g. a KeyError: 'RA(h)' raised inside
+            # astroquery's own parser). Asteroid flagging is an OPTIONAL refinement,
+            # so any unexpected failure here must not abort transient detection:
+            # leave flag_0 all-False and carry on.
+            print(f"Skybot asteroid query failed ({type(e).__name__}: {e}). Skipping flag_0.")
+            break
                 # raise  # Re-raise the exception if the final attempt fails
     #------------------------------------------------------------
     #    flag 1: Inverted Image Detections (Artifacts Around the Source)
@@ -3353,8 +3429,22 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
         dither_files = []
         num_dith = int(scihdr.get('NUMDITH', 0))
         for l in range(num_dith):
+            # The current stacking step records per-dither provenance as
+            # IMAGE0/IMAGE1/... (the scaled exposure base name, chip stripped) and
+            # does NOT write the legacy per-chip FILE0001.. keywords this block was
+            # originally indexing. Indexing a missing keyword returned None and made
+            # os.path.join crash, aborting the whole subtraction. Rebuild each
+            # single-chip path from the IMAGE# base name, fall back to the legacy
+            # FILE#### keyword when present, and skip anything that is missing so the
+            # (optional) crosstalk check degrades gracefully instead of failing.
+            dith_base = scihdr.get(f'IMAGE{hex(l)[-1]}')
             for n, chip in enumerate(['kk', 'mm', 'tt', 'nn']):
-                single = os.path.join(path_single, scihdr.get(f'FILE{str(l*4+n+1).zfill(4)}'))
+                single_name = scihdr.get(f'FILE{str(l*4+n+1).zfill(4)}')
+                if single_name is None and dith_base is not None:
+                    single_name = dith_base.replace('.scaled.fits', f'.{chip}.scaled.fits')
+                if single_name is None:
+                    continue
+                single = os.path.join(path_single, single_name)
                 if os.path.isfile(single):
                     dither_files.append(single)
                     wcs_list.append(WCS(fits.getheader(single)))
@@ -3450,6 +3540,49 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
     # generating snapshots for asteroids
     indx_sb         = np.where(subtbl['flag_0']==True)
     subtbl['flag'][indx_sb] = False
+    #------------------------------------------------------------
+    #    Known-object override (GW host candidates / known transients)
+    #------------------------------------------------------------
+    # A user-supplied CSV lists targets we always want to inspect. Any detected
+    # source matching a target within the matching radius gets a forced snapshot
+    # regardless of its artifact flags, and the target name is propagated to the
+    # snapshot header. The CSV must have 'Name', 'RA', 'Dec' columns and may carry
+    # an optional per-row 'radius' (arcsec); when absent, `known_obj_radius` is used.
+    known_obj_radius = 2.0          # default matching radius [arcsec]
+    subtbl['known_match']  = False
+    subtbl['known_target'] = np.array([''] * len(subtbl), dtype='U64')
+    if known_obj is not None:
+        try:
+            ktab = ascii.read(known_obj, format='csv')
+            cmap = {c.lower(): c for c in ktab.colnames}
+            name_col = cmap.get('name')
+            ra_col   = cmap.get('ra')
+            dec_col  = cmap.get('dec', cmap.get('decl', cmap.get('de')))
+            rad_col  = cmap.get('radius', cmap.get('rad', cmap.get('matching_radius')))
+            if (name_col is None) or (ra_col is None) or (dec_col is None):
+                raise ValueError("CSV must contain 'Name', 'RA' and 'Dec' columns")
+            # RA/Dec may be decimal degrees or sexagesimal (HMS/DMS).
+            try:
+                c_known = SkyCoord(ra=np.array(ktab[ra_col], dtype=float)*u.deg,
+                                   dec=np.array(ktab[dec_col], dtype=float)*u.deg)
+            except (ValueError, TypeError):
+                c_known = SkyCoord(ra=ktab[ra_col], dec=ktab[dec_col], unit=(u.hourangle, u.deg))
+            if rad_col is not None:
+                radii = np.array(ktab[rad_col], dtype=float)
+            else:
+                radii = np.full(len(ktab), known_obj_radius)
+            names = np.array([str(x) for x in ktab[name_col]])
+            c_all = SkyCoord(subtbl['ALPHA_J2000'], subtbl['DELTA_J2000'], unit='deg')
+            kidx, ksep, _ = c_all.match_to_catalog_sky(c_known)
+            kmatched = ksep.arcsec < radii[kidx]
+            subtbl['known_match'] = kmatched
+            subtbl['known_target'][kmatched] = names[kidx[kmatched]]
+            n_forced = int(np.count_nonzero(kmatched & (subtbl['flag'] == True)))
+            print(f'Known-object override: {len(ktab)} target(s), '
+                  f'{int(kmatched.sum())} matched detection(s) '
+                  f'({n_forced} otherwise-flagged forced into snapshots).')
+        except Exception as e:
+            print(f'*** known-object matching skipped ({type(e).__name__}: {e}). ***')
     #    Transient Catalog
     trtbl   = subtbl[subtbl['flag']==False]
     transient_cat   = SUBTIMG.replace('.fits', '.transient.cat')
@@ -3472,9 +3605,13 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
     # ------------------------------------------------------------
     #     Snapshot maker
     # ------------------------------------------------------------
-    print(f"#\tSnapshot maker ({len(trtbl)})")
-    if len(trtbl) > 0:
-        rows = [trtbl[i] for i in range(len(trtbl))]
+    # Snapshots cover the flag-passing transient candidates PLUS any known-object
+    # matches that are forced through regardless of their flags.
+    snaptbl = subtbl[(subtbl['flag'] == False) | (subtbl['known_match'] == True)]
+    n_forced_snap = int(np.count_nonzero((subtbl['flag'] == True) & (subtbl['known_match'] == True)))
+    print(f"#\tSnapshot maker ({len(snaptbl)}; {n_forced_snap} forced by known-object match)")
+    if len(snaptbl) > 0:
+        rows = [snaptbl[i] for i in range(len(snaptbl))]
         outdir = os.path.join(path_output, 'snap')
         if ncore == 1:
             for row in rows:

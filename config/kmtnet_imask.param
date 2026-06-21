@@ -34,6 +34,8 @@ ISOAREA_IMAGE            #Isophotal area above Analysis threshold               
 ISOAREAF_IMAGE           #Isophotal area (filtered) above Detection threshold       [pixel**2]
 IMAFLAGS_ISO             #FLAG-image flags OR'ed over the iso. profile             
 NIMAFLAGS_ISO            #Number of flagged pixels entering IMAFLAGS_ISO 
+BACKGROUND               #Background at centroid position                           [count]
+SNR_WIN                  #Gaussian-weighted SNR
 
 #NUMBER                   Running object number                                    
 #EXT_NUMBER               FITS extension number                                    

@@ -54,7 +54,13 @@ The pipeline follows a systematic approach to process KMTNet images from raw dat
    - Comprehensive quality assessment for each individual image
    - Generates bad-pixel masks (cosmic rays, cross-talk, pixel bleeding)
    - Matches sources with reference catalogs for WCS validation
-   - Sectional analysis divides image into grid for detailed quality assessment
+   - Sectional analysis divides the image into a grid for detailed quality assessment
+   - **Edge-focused astrometric QA**: the pass/fail decision is made only from the
+     outermost ring of grid sections, where residual distortion is largest. The
+     interior sections, which are almost always well constrained, are ignored. The
+     scrutiny zone and rejection threshold are tunable via `qa_edge_ring` (ring
+     width, default 1) and `qa_max_edge_bad` (default: reject if ≥2 outer-ring
+     sections are bad)
 
 ### 5. **Zero-Point Scaling (`zpscale`)**
    - Photometric calibration and homogenization across amplifier regions
@@ -84,6 +90,11 @@ The pipeline follows a systematic approach to process KMTNet images from raw dat
    - Applies comprehensive 10-flag filtering system to identify artifacts
    - Generates cutout images for transient candidates
    - Creates final transient candidate catalogs with quality metrics
+   - **Known-object override**: an optional target list (e.g. gravitational-wave
+     host-galaxy candidates or already-known transients) forces snapshot generation
+     for any detection that matches a target's coordinates, regardless of its flags.
+     Matched snapshots are tagged in their FITS header with `KNOWNOBJ=T` and the
+     matched `TARGET` name (see [Tracking Known Targets](#tracking-known-targets))
 
 ### 10. **Transient Validation (Post-Processing)**
    - **PSF Analysis**: Use PSFEx for detailed point-spread function analysis of candidates
@@ -134,17 +145,38 @@ watchdog      # file system monitoring
 ### Basic Usage
 
 #### Running the Complete Pipeline
-Execute the pipeline for a specific observation date:
+Execute the pipeline for a specific observation run (the raw-data directory name):
 ```bash
-python pipe/KMTNet_ToO_pipeline.py YYYYMMDD
+python pipe/KMTNet_ToO_pipeline.py 250212_CTIO
 ```
-Replace `YYYYMMDD` with your observation date (e.g., `20241201`).
+The positional argument is the raw-data sub-directory under `data/raw/`
+(e.g. `250212_CTIO`, `YYMMDD_SITE`).
 
 #### Monitoring Mode
 For real-time processing with automatic data detection:
 ```bash
 python pipe/KMTNet_ToO_pipeline.py AUTO
 ```
+
+#### Tracking Known Targets
+To force snapshots for known sources (GW host-galaxy candidates, known transients,
+etc.) even when they are flagged, supply a target list with `--known-obj`:
+```bash
+python pipe/KMTNet_ToO_pipeline.py 250212_CTIO --known-obj S250206dm/S250206dm.csv
+```
+- The path is resolved relative to the `catalog/` directory (absolute paths also
+  work), so the example above points to `catalog/S250206dm/S250206dm.csv`.
+- The CSV must contain `Name`, `RA`, `Dec` columns (RA/Dec in decimal degrees).
+  An optional `radius` column overrides the default 2″ match radius per row:
+
+```csv
+Name,RA,Dec,radius
+GW_host_A,226.587365,-69.012134,3.0
+KnownSN_B,230.060042,-69.020603,2.0
+```
+- Any detection within the match radius of a target gets a snapshot regardless of
+  its flag status, and the snapshot header records `KNOWNOBJ=T` together with the
+  matched `TARGET` name for provenance.
 
 #### Individual Function Usage
 You can also run individual pipeline functions:
@@ -240,6 +272,13 @@ The pipeline is designed to be highly customizable:
 - **Parallel Processing**: Multi-core support for image stacking and transient detection
 - **Memory Management**: Efficient handling of large KMTNet images
 - **Disk I/O**: Optimized file operations for high-throughput processing
+- **Vectorized Masking**: Saturation-bleed masking is fully NumPy-vectorized (with
+  subsampled background statistics), reducing per-chip masking time from minutes to
+  a few seconds
+- **Fault Tolerance**: Per-image and per-step error isolation so that a single bad
+  chip never aborts a batch run. Optional steps (cosmic-ray rejection, asteroid
+  look-ups, crosstalk flagging) degrade gracefully when external services or
+  metadata are unavailable
 
 ### Transient Candidate Validation
 For complete transient validation, the pipeline output should be processed with additional tools:

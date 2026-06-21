@@ -377,6 +377,16 @@ def generate_snapshot(row, cutsize=2.0, pixscale=0.4, outdir=None):
     position = SkyCoord(ra=tra, dec=tdec, frame='icrs', unit='deg')
     size = u.Quantity((cutsize, cutsize), u.arcmin)
 
+    # Optional known-object provenance (present only when a target CSV was used).
+    try:
+        known_match = bool(row['known_match'])
+    except (KeyError, IndexError, ValueError):
+        known_match = False
+    try:
+        known_target = str(row['known_target']).strip()
+    except (KeyError, IndexError, ValueError):
+        known_target = ''
+
     for image, kind in zip([inim, hcim, hdim], ['new', 'ref', 'sub']):
         with fits.open(image) as hdul:
             hdu = hdul[0]
@@ -398,6 +408,8 @@ def generate_snapshot(row, cutsize=2.0, pixscale=0.4, outdir=None):
                 'CLSSTAR': (row['CLASS_STAR'], "transient candidate CLASS_STAR"),
                 'ASTEROID': (row['flag_0'], "moving object matched within 5arcsec"),
                 'IMAFLAG': (row['IMAFLAGS_ISO'], "Mask image flags"),
+                'KNOWNOBJ': (known_match, "snapshot forced by known-object (CSV) match"),
+                'TARGET': (known_target, "matched known-object name"),
             }
             for key, value in metadata.items():
                 hdu.header[key] = value

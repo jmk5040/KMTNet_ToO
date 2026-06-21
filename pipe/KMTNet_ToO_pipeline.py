@@ -32,24 +32,49 @@ from astropy.table import Table, vstack
 import KMTNet_ToO_functions as pipe
 import logging
 
-def ToO_pipeline(date, field_info='kmtnet_grid.fits'):
+def ToO_pipeline(date, field_info='kmtnet_grid.fits', known_obj=None, **steps):
     
     # start of the process
     start = time.time()
     print(f'KMTNet ToO Pipeline Starts for {date}.')
     print(f'Field/Tiling coordinate information referring to {field_info}.')
+
+    # Optional list of known targets (e.g. gravitational-wave host-galaxy
+    # candidates or already-known transients) whose matching detections must
+    # always be snapshotted regardless of the artifact flags. The path is taken
+    # relative to the catalog/ directory unless an absolute path is supplied.
+    known_obj_path = None
+    if known_obj:
+        known_obj_path = known_obj if os.path.isabs(known_obj) else os.path.join(path_cat, known_obj)
+        if os.path.isfile(known_obj_path):
+            print(f'Known-object list: {known_obj_path}')
+        else:
+            print(f'*** known-obj CSV not found: {known_obj_path}. Continuing without forced snapshots. ***')
+            known_obj_path = None
     
     # process managements
-    ampcompro   = True
-    astrompro   = True
-    astromqapro = True
-    zpscalepro  = True
-    bpmaskpro   = True
-    stackingpro = True
-    qa4stackpro = True
-    catalogpro  = True
-    subtpro     = True
-    rbclasspro  = True
+    # Every stage defaults to ON, but individual stages can be toggled by the
+    # caller, e.g. ToO_pipeline('20250212_CTIO', ampcompro=False, astrompro=False)
+    # to resume from already-calibrated chip images. Unknown keys raise early.
+    _defaults = dict(
+        ampcompro=True, astrompro=True, astromqapro=True, zpscalepro=True,
+        bpmaskpro=True, stackingpro=True, qa4stackpro=True, catalogpro=True,
+        subtpro=True, rbclasspro=True,
+    )
+    unknown = set(steps) - set(_defaults)
+    if unknown:
+        raise TypeError(f'ToO_pipeline got unexpected step flag(s): {sorted(unknown)}')
+    _defaults.update(steps)
+    ampcompro   = _defaults['ampcompro']
+    astrompro   = _defaults['astrompro']
+    astromqapro = _defaults['astromqapro']
+    zpscalepro  = _defaults['zpscalepro']
+    bpmaskpro   = _defaults['bpmaskpro']
+    stackingpro = _defaults['stackingpro']
+    qa4stackpro = _defaults['qa4stackpro']
+    catalogpro  = _defaults['catalogpro']
+    subtpro     = _defaults['subtpro']
+    rbclasspro  = _defaults['rbclasspro']
 
     process_status = {
         'ampcompro': ampcompro, 'astrompro': astrompro, 'astromqapro': astromqapro, 
@@ -132,7 +157,10 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits'):
         imgs   = [file for file in all_files if regex.match(os.path.basename(file))]
         for img in imgs:
             # if 'QARESULT' not in fits.open(img)[0].header:
-            pipe.qatest(img, configdir=path_cfg, refcatdir=path_cat, refcatname='gaiaxp', gridcat=field_info, crreject=True, bleedreject=True, weightmap=True, imtype='chip')
+            try:
+                pipe.qatest(img, configdir=path_cfg, refcatdir=path_cat, refcatname='gaiaxp', gridcat=field_info, crreject=True, bleedreject=True, weightmap=True, imtype='chip')
+            except Exception as e:
+                print(f'*** astromqa failed for {os.path.basename(img)}: {e}. Skipping this chip. ***')
             os.system(f'chmod 777 {path_output1}*mask.fits')
         
         log3            = copy.deepcopy(log)
@@ -157,7 +185,11 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits'):
         imgs   = [file for file in all_files if regex.match(os.path.basename(file))]
         
         for img in imgs:
-            outname = pipe.zpscale(img, path_output2, path_cfg, path_cat, path_plot, zpscaled=30.0, figure=False, start=start, gridcat=field_info)
+            try:
+                outname = pipe.zpscale(img, path_output2, path_cfg, path_cat, path_plot, zpscaled=30.0, figure=False, start=start, gridcat=field_info)
+            except Exception as e:
+                print(f'*** zpscale failed for {os.path.basename(img)}: {e}. Skipping this chip. ***')
+                continue
             if outname != None and os.path.exists(img.replace('.fits', '.mask.fits')):
                 os.rename(img.replace('.fits', '.mask.fits'), os.path.join(path_output2, outname.replace('.scaled.', '.mask.')))
         log4            = copy.deepcopy(log)
@@ -182,7 +214,10 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits'):
         imgs   = [file for file in all_files if regex.match(os.path.basename(file))]
 
         for img in imgs:
-            pipe.BPM_update(img, path_cfg)
+            try:
+                pipe.BPM_update(img, path_cfg)
+            except Exception as e:
+                print(f'*** BPM update failed for {os.path.basename(img)}: {e}. Skipping this chip. ***')
         
         logm            = copy.deepcopy(log)
         logm['process'] = 'bpmaskpro'
@@ -225,7 +260,10 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits'):
         stackimgs = [file for file in all_files if regex.match(os.path.basename(file)) and regex.match(os.path.basename(file)).group('type') == 'stack']
         for simg in stackimgs:
             # if 'ALNRMS' not in fits.open(simg)[0].header:
-            pipe.qatest(simg, configdir=path_cfg, refcatdir=path_cat, refcatname='gaiaxp', gridcat=field_info, crreject=False, bleedreject=False, weightmap=True, imtype='stack')
+            try:
+                pipe.qatest(simg, configdir=path_cfg, refcatdir=path_cat, refcatname='gaiaxp', gridcat=field_info, crreject=False, bleedreject=False, weightmap=True, imtype='stack')
+            except Exception as e:
+                print(f'*** stack QA failed for {os.path.basename(simg)}: {e}. Skipping. ***')
                 # os.system('rm default*')
                 # os.system('rm kmtn*')
 
@@ -250,7 +288,10 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits'):
         all_cats= sorted(glob.glob(f'{path_output3}*.cat'))
         cats    = [file for file in all_cats if regex.match(os.path.basename(file))]
         for cat in cats:
-            pipe.catalogmaker(cat, path_output=path_output3, path_cat=path_cat, figure=False, start=start, path_plot=path_plot)
+            try:
+                pipe.catalogmaker(cat, path_output=path_output3, path_cat=path_cat, figure=False, start=start, path_plot=path_plot)
+            except Exception as e:
+                print(f'*** catalogmaker failed for {os.path.basename(cat)}: {e}. Skipping. ***')
 
         log7            = copy.deepcopy(log)
         log7['process'] = 'catalogpro'
@@ -274,7 +315,10 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits'):
         all_files   = sorted(glob.glob(f'{path_output3}*.fits'))
         stackimgs   = [file for file in all_files if regex.match(os.path.basename(file))]
         for simg in stackimgs:
-            pipe.subtraction(simg, path_ref=path_tmpl, path_cat=path_output3, path_refcat=path_tmpl, path_output=path_output4, path_config=path_cfg, detect=1.5)
+            try:
+                pipe.subtraction(simg, path_ref=path_tmpl, path_cat=path_output3, path_refcat=path_tmpl, path_output=path_output4, path_config=path_cfg, detect=1.5, known_obj=known_obj_path)
+            except Exception as e:
+                print(f'*** subtraction failed for {os.path.basename(simg)}: {e}. Skipping. ***')
         
         log8            = copy.deepcopy(log)
         log8['process'] = 'subtpro'
@@ -508,19 +552,31 @@ class TooWatcher(FileSystemEventHandler):
 if __name__ == "__main__":
     # Add command line argument parsing
     parser = argparse.ArgumentParser(description="KMTNet_ToO_pipeline.py")
-    parser.parse_args()
-    
+    parser.add_argument('date', nargs='?', default=None,
+                        help="Data directory under raw/ to process (e.g. 250212_CTIO), "
+                             "or 'AUTO' for upload monitoring. Omit for interactive selection.")
+    parser.add_argument('--known-obj', dest='known_obj', default=None, metavar='CSV',
+                        help="CSV of known targets (columns: Name, RA, Dec, and optional per-row "
+                             "'radius' in arcsec), given relative to the catalog/ directory. Any "
+                             "transient candidate matching a target (default radius 2\") always gets "
+                             "a snapshot regardless of its flags, tagged with the target name in the header.")
+    args = parser.parse_args()
+
     watch_directory     = path_raw
     ncores              = 1
-    data_dirs   = sorted([d for d in os.listdir(watch_directory) if os.path.isdir(os.path.join(watch_directory, d))])
 
-    print(f"List of Data Directories in {watch_directory}:")
-    print("="*20)
-    for directory in data_dirs:
-        print(directory)
-    print("="*20)
-    
-    user_input = input('Enter the directory name to process, or type ‘AUTO’ to start automatic monitoring of new uploads: ')
+    # A directory passed on the command line runs non-interactively; otherwise the
+    # user is prompted to choose one (the original interactive behaviour).
+    if args.date is not None:
+        user_input = args.date
+    else:
+        data_dirs   = sorted([d for d in os.listdir(watch_directory) if os.path.isdir(os.path.join(watch_directory, d))])
+        print(f"List of Data Directories in {watch_directory}:")
+        print("="*20)
+        for directory in data_dirs:
+            print(directory)
+        print("="*20)
+        user_input = input('Enter the directory name to process, or type ‘AUTO’ to start automatic monitoring of new uploads: ')
 
     if user_input == "AUTO":
         # Set up logging
@@ -547,6 +603,6 @@ if __name__ == "__main__":
     
     else:
         if os.path.isdir(os.path.join(watch_directory, user_input)):
-            ToO_pipeline(user_input)
+            ToO_pipeline(user_input, known_obj=args.known_obj)
         else:
             print(f'Check if {os.path.join(watch_directory, user_input)} exists.')
