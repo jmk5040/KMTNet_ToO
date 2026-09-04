@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+#
+# KMTNet ToO -- data-leak guard.
+#
+# The repository root doubles as the live reduction directory on the KMTNet
+# server, so terabytes of proprietary observational data sit next to the code.
+# .gitignore is the first line of defence; this hook is the second, because
+# `git add -f` bypasses .gitignore entirely.
+#
+# Install:   ln -sf ../../tools/pre-commit .git/hooks/pre-commit
+# Bypass:    git commit --no-verify   (deliberate exceptions only)
+
+set -u
+
+MAX_BYTES=$((10 * 1024 * 1024))   # 10 MB
+
+# Paths that must never be committed, matched against the staged path prefix.
+FORBIDDEN_PREFIXES=(
+    "data/"
+    "bin/"
+    "GECKO/"
+    "catalog/"
+    "result/"
+    "ignore/"
+    "config/badpixelmap/"
+    "pipe/subtraction_out/"
+)
+
+# Deliberate exceptions: small distribution assets that live under a forbidden
+# prefix. Matched as exact paths.
+ALLOWED_PATHS=(
+    "catalog/gaiaxp/gaiaxp_0000.fits"
+    "data/raw/example/kmtx.20240101.000000.fits"
+)
+
+fail=0
+
+is_allowed() {
+    local path="$1"
+    for a in "${ALLOWED_PATHS[@]}"; do
+        [ "$path" = "$a" ] && return 0
+    done
+    return 1
+}
+
+# Added/copied/modified/renamed staged files, NUL-separated to survive spaces.
+while IFS= read -r -d '' path; do
+
+    if is_allowed "$path"; then
+        continue
+    fi
+
+    for prefix in "${FORBIDDEN_PREFIXES[@]}"; do
+        case "$path" in
+            "$prefix"*)
+                echo "pre-commit: refusing to commit data path: $path" >&2
+                echo "            ($prefix is observational data / site-specific, never distributed)" >&2
+                fail=1
+                ;;
+        esac
+    done
+
+    # Size is measured on the staged blob, not the working tree, so a file
+    # staged before being truncated is still caught.
+    blob=$(git ls-files --stage -- "$path" | awk '{print $2}')
+    if [ -n "$blob" ]; then
+        size=$(git cat-file -s "$blob" 2>/dev/null || echo 0)
+        if [ "$size" -gt "$MAX_BYTES" ]; then
+            echo "pre-commit: refusing to commit large file: $path ($((size / 1024 / 1024)) MB > 10 MB)" >&2
+            fail=1
+        fi
+    fi
+
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+
+if [ "$fail" -ne 0 ]; then
+    echo "" >&2
+    echo "Commit aborted. If this is genuinely intended, add the path to" >&2
+    echo "ALLOWED_PATHS in tools/pre-commit, or bypass once with --no-verify." >&2
+    exit 1
+fi
+
+exit 0

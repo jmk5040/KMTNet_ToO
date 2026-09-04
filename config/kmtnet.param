@@ -196,7 +196,17 @@ FLUX_MAX                 # Peak flux above background                           
 #ISO6                     # Isophotal area at level 6                                 [pixel**2]
 #ISO7                     # Isophotal area at level 7                                 [pixel**2]
 #FLAGS_WIN                # Flags for WINdowed parameters                            
-IMAFLAGS_ISO             # FLAG-image flags OR'ed over the iso. profile             
+# IMAFLAGS_ISO           # FLAG-image flags OR'ed over the iso. profile
+#   Deliberately OFF here. kmtnet.param drives ampcom() and astrom(), and
+#   neither passes -FLAG_IMAGE, so requesting this column makes SExtractor fall
+#   back to the kmtnet.sex default (FLAG_IMAGE flag.fits, resolved against the
+#   CWD) and abort with "cannot open flag.fits" -- or, if it does find it, with
+#   "Incompatible FLAG-map size", since flag.fits is a 22000x22000 stack-level
+#   map while these calls work on 9216x9232 chips. Neither catalogue is ever
+#   read for IMAFLAGS_ISO downstream.
+#   The stages that genuinely need it (qatest/load_incat, zpscale, subtraction)
+#   pass -FLAG_IMAGE explicitly and use kmtnet_imask.param / kmtnet_psf.param,
+#   both of which still request the column.
 #NIMAFLAGS_ISO            # Number of flagged pixels entering IMAFLAGS_ISO           
 #NLOWWEIGHT_ISO           # Nb of pixels with low weight over the iso. profile       
 #NLOWDWEIGHT_ISO          # Nb of pixels with low det. weight over the iso. profile  
