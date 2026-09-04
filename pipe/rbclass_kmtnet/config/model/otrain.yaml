@@ -1,0 +1,4 @@
+_target_: modules.networks.OTrain
+imsize: ${dataset.imsize}
+in_channels: ${len:${dataset.channels}}
+num_classes: 1

@@ -1,0 +1,14 @@
+data_root: [
+  /data/Postech/data/injected_psf_kmtnet_20230925,
+  /data/PSF_INJECTION_NGI
+]
+meta_path: [
+  /home/postech/projects/kmtnet/data/meta_random_injection.csv,
+  /home/postech/projects/kmtnet/data/meta_near_galaxy_injection-v1.0.csv
+]
+test_data_root: /data/Postech/data/test
+test_meta_path: /data/Postech/data/test/meta.csv
+train_dataset_type: ri
+channels: [ref, new, sub]
+normalize: min_max
+imsize: 51

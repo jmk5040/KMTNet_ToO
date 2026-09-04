@@ -15,6 +15,11 @@ ignore/
 pipe/subtraction_out/
 pipe/legacy/
 
+# Real/bogus classifier: the code is tracked, the trained weights are not
+# (196 MB of .bin checkpoints) -- see pipe/rbclass_kmtnet/README.md
+pipe/rbclass_kmtnet/ckpt/
+pipe/rbclass_kmtnet/result_table.csv
+
 # Bulk/site-specific config products (the small text configs ARE tracked)
 config/badpixelmap/
 config/flag.fits
