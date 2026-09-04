@@ -82,3 +82,8 @@ dist/
 .vscode/
 .idea/
 .DS_Store
+
+# SWarp VMEM swap files and SExtractor-family scratch dropped into the CWD
+vm*.tmp
+result_table.csv
+result_table_over50.csv

@@ -395,23 +395,46 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits', known_obj=None, **steps):
     
     if rbclasspro:
         
-        if len(os.listdir(path_output5)) > 0:
-            command = ['python', 'rbclass_kmtnet/inference.py', '--dir_fits', path_output5, '--dir_ckpt', 'rbclass_kmtnet/ckpt', '--ckpt_name', 'model:OTrain_imsize:51_channels:rns_normalize:minmax_name:ri+ngi+gd_seed:0.bin']
-            result = subprocess.run(command, capture_output=True, text=True)
-
-            # Check result
-            if result.returncode == 0:
-                print("inference.py executed successfully.")
-                print(result.stdout)
-            else:
-                print("inference.py execution failed.")
-                print(result.stderr)
+        # This stage now both scores the candidates and writes the surviving
+        # snapshots. inference_cutout.py cuts each candidate's 51x51 window out
+        # of the three full-frame images in memory, so subtraction() no longer
+        # writes tens of thousands of stamps that only a handful are ever
+        # looked at. Its input is the transient catalogue, not a stamp
+        # directory.
+        _pipedir = os.path.dirname(os.path.abspath(__file__))
+        trcats = sorted(glob.glob(f'{path_output4}*.transient.cat'))
+        if trcats:
+            for trcat in trcats:
+                command = [
+                    sys.executable, os.path.join(_pipedir, 'rbclass_kmtnet', 'inference_cutout.py'),
+                    '--transient_cat', trcat,
+                    '--outdir', path_output5,
+                    '--dir_ckpt', os.path.join(_pipedir, 'rbclass_kmtnet', 'ckpt'),
+                    '--ckpt_name', 'model:OTrain_imsize:51_channels:rns_normalize:minmax_name:ri+ngi+gd_seed:0.bin',
+                    '--snap_thresh', '0.5',
+                    '--num_workers', '8',
+                ]
+                result = subprocess.run(command, capture_output=True, text=True, cwd=_pipedir)
+                if result.returncode == 0:
+                    print(f"inference_cutout.py executed successfully for {os.path.basename(trcat)}.")
+                    print(result.stdout)
+                else:
+                    print(f"inference_cutout.py execution failed for {os.path.basename(trcat)}.")
+                    print(result.stderr)
         else:
-            print(f"No files found in {path_output5}. Skipping rbclasspro subprocess.")
+            print(f"No transient catalogue found in {path_output4}. Skipping rbclasspro subprocess.")
 
         log9            = copy.deepcopy(log)
         log9['process'] = 'rbclasspro'
-        log9['frames']  = len(sorted(glob.glob(f"{path_output5}*.new.*")))
+        # Number of candidates actually scored -- the stage's real workload.
+        # Counting snapshot files would now under-report it by ~180x, since only
+        # the survivors get written.
+        _rbscore = os.path.join(path_output5, 'rbscore.csv')
+        try:
+            with open(_rbscore) as _f:
+                log9['frames'] = max(sum(1 for _ in _f) - 1, 0)
+        except OSError:
+            log9['frames'] = 0
         log9['time']    = round(time.time()-start, 2)
         
         try:

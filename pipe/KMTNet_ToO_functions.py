@@ -3732,23 +3732,32 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
     f.close()
 
     # ------------------------------------------------------------
-    #     Snapshot maker
+    #     Snapshot maker -- moved to the Real/Bogus stage
     # ------------------------------------------------------------
-    # Snapshots cover the flag-passing transient candidates PLUS any known-object
-    # matches that are forced through regardless of their flags.
-    snaptbl = subtbl[(subtbl['flag'] == False) | (subtbl['known_match'] == True)]
+    # This stage used to cut a postage stamp for every flag-passing candidate,
+    # which for one KMTNet field meant 3 x 26,028 = 78,084 files and 8.8 GB, and
+    # took 3,402 s -- 29% of the whole reduction -- so that the classifier could
+    # then read them back and mark ~145 as worth a human's time. The stamps are
+    # also 150x150 while the model center-crops to 51x51, so 88% of the written
+    # pixels were never read.
+    #
+    # rbclass_kmtnet/inference_cutout.py now cuts each candidate's window out of
+    # the three full-frame images in memory, scores every candidate, and writes
+    # stamps only for the survivors. Verified to reproduce the old scores and
+    # stamps bit-for-bit (26,028/26,028 scores identical, 435/435 stamp pixels
+    # and headers identical) in 47.7 s instead of 4,003 s.
+    #
+    # Everything that stage needs is already written above: the full transient
+    # catalogue (with flag / known_match / inim / hcim / hdim columns) plus the
+    # three images it points at. `cutsize` is kept in the signature because it
+    # defines the stamp geometry and must stay in sync with the --cutsize passed
+    # to inference_cutout.py; `pixscale` and `ncore` are likewise retained for
+    # API compatibility.
+    n_cand = int(np.count_nonzero((subtbl['flag'] == False) | (subtbl['known_match'] == True)))
     n_forced_snap = int(np.count_nonzero((subtbl['flag'] == True) & (subtbl['known_match'] == True)))
-    print(f"#\tSnapshot maker ({len(snaptbl)}; {n_forced_snap} forced by known-object match)")
-    if len(snaptbl) > 0:
-        rows = [snaptbl[i] for i in range(len(snaptbl))]
-        outdir = os.path.join(path_output, 'snap')
-        if ncore == 1:
-            for row in rows:
-                generate_snapshot(row, cutsize=cutsize, pixscale=pixscale, outdir=outdir)
-        else:
-            with multiprocessing.Pool(processes=ncore) as pool:
-                func = partial(generate_snapshot, cutsize=cutsize, pixscale=pixscale, outdir=outdir)
-                results = pool.map(func, rows)
+    if n_cand > 0:
+        print(f"#\tSnapshot candidates ({n_cand}; {n_forced_snap} forced by known-object match) "
+              f"-> stamps are written by the Real/Bogus stage")
     else:
         print('No transient candidates.')
     print("All Done")
