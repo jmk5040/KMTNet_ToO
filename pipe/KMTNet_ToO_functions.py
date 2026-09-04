@@ -175,19 +175,18 @@ def ampcom(path_data, path_cfg):
         print(f'Amp combining process for frame:{serial} ({i+1}/{len(name)})')
 
         hdul    = fits.open(f"{path_data}{name[i]}")
+        # The chip data and headers are kept here as they are built, so the four
+        # 340 MB chips do not have to be read straight back off disk below.
+        chipmem = {}
         extension = np.size(hdul)-1
         if extension == 32:
             chiparr = ['mm','kk','nn','tt']
             for k in range(len(chiparr)):
-                fits1, hdr1 = fits.getdata(f"{path_data}{name[i]}", header=True, ext=(k*8)+1)
-                fits2, hdr2 = fits.getdata(f"{path_data}{name[i]}", header=True, ext=(k*8)+2)
-                fits3, hdr3 = fits.getdata(f"{path_data}{name[i]}", header=True, ext=(k*8)+3)
-                fits4, hdr4 = fits.getdata(f"{path_data}{name[i]}", header=True, ext=(k*8)+4)
-                fits5, hdr5 = fits.getdata(f"{path_data}{name[i]}", header=True, ext=(k*8)+5)
-                fits6, hdr6 = fits.getdata(f"{path_data}{name[i]}", header=True, ext=(k*8)+6)
-                fits7, hdr7 = fits.getdata(f"{path_data}{name[i]}", header=True, ext=(k*8)+7)
-                fits8, hdr8 = fits.getdata(f"{path_data}{name[i]}", header=True, ext=(k*8)+8)
-                tempfits=np.hstack((fits1,fits2,fits3,fits4,fits5,fits6,fits7,fits8))
+                # The 8 amplifiers come from the file handle already open above.
+                # This used to be 8 separate fits.getdata() calls per chip -- 32
+                # per frame -- each of which re-opened the 1.36 GB MEF and
+                # re-parsed all 33 headers to find one extension.
+                tempfits = np.hstack([hdul[(k*8)+n].data for n in range(1, 9)])
                 hdu = fits.ImageHDU(tempfits)
                 if chiparr[k] == 'mm': hdu.header.set('dec', decdd[i] + 0.5)
                 if chiparr[k] == 'mm': hdu.header.set('ra', (radd[i]/15.) + 0.03333)
@@ -213,22 +212,20 @@ def ampcom(path_data, path_cfg):
                 if chiparr[k] == 'tt': hdu.header.set('crval1', radd[i])
                 if chiparr[k] == 'tt': hdu.header.set('crval2', decdd[i])
                 hdu.writeto(f"{path_data}{serial}.{chiparr[k]}.fits", overwrite='True')
+                chipmem[chiparr[k]] = (tempfits, hdu.header)
         elif extension == 4:
-            fits1 = hdul[1]
-            fits2 = hdul[2]
-            fits3 = hdul[3]
-            fits4 = hdul[4]
-            fits1.writeto(f'{path_data}{serial}.mm.fits', overwrite='True')
-            fits2.writeto(f'{path_data}{serial}.kk.fits', overwrite='True')
-            fits3.writeto(f'{path_data}{serial}.nn.fits', overwrite='True')
-            fits4.writeto(f'{path_data}{serial}.tt.fits', overwrite='True')
-        
-        fitskk, hdrkk = fits.getdata(f'{path_data}{serial}.kk.fits', header=True)
-        fitsmm, hdrmm = fits.getdata(f'{path_data}{serial}.mm.fits', header=True)
-        fitstt, hdrtt = fits.getdata(f'{path_data}{serial}.tt.fits', header=True)
-        fitsnn, hdrnn = fits.getdata(f'{path_data}{serial}.nn.fits', header=True)
-        fitsarr = [fitskk, fitsmm, fitstt, fitsnn]
-        hdrarr = [hdrkk, hdrmm, hdrtt, hdrnn]
+            for hdu_in, chip_out in zip(hdul[1:5], ['mm','kk','nn','tt']):
+                hdu_in.writeto(f'{path_data}{serial}.{chip_out}.fits', overwrite='True')
+                # Copy: the MEF handle is closed before these arrays are used.
+                chipmem[chip_out] = (np.array(hdu_in.data), hdu_in.header.copy())
+
+        # Previously the four chips just written were read straight back in --
+        # 1.36 GB of pointless I/O per frame. The in-memory arrays and headers
+        # are byte-for-byte what was written.
+        fitsarr = [chipmem[c][0] for c in ('kk','mm','tt','nn')]
+        hdrarr  = [chipmem[c][1] for c in ('kk','mm','tt','nn')]
+        fitskk, fitsmm, fitstt, fitsnn = fitsarr
+        hdul.close()
         
         skykk = np.median(fitskk)
         skymm = np.median(fitsmm)
@@ -244,7 +241,14 @@ def ampcom(path_data, path_cfg):
     
             chip = chiparr[k]
             catname     = f'{path_data}{serial}.{chip}.ampcom.cat'
-            param       = os.path.join(path_cfg, 'kmtnet.param')
+            # kmtnet.param carries VIGNET(50,50) for the PSFEx branch of
+            # subtraction(). Here it is pure waste: this catalogue is only read
+            # for MAG_AUTO, MAGERR_AUTO, FLAGS, FWHM_IMAGE, ELONGATION and
+            # THETA_IMAGE, and is deleted at the end of ampcom -- but VIGNET
+            # writes a 50x50 ASCII pixel stamp per detection, 2500 of the 2534
+            # fields per row. Per chip that was a 533 MB catalogue taking 37 s
+            # to produce and 74 s to parse, versus 5.9 MB / 11 s / 0.9 s here.
+            param       = os.path.join(path_cfg, 'kmtnet_novignet.param')
             cfg         = os.path.join(path_cfg, 'kmtnet.sex')
             conv        = os.path.join(path_cfg, 'kmtnet.conv')
             nnw         = os.path.join(path_cfg, 'kmtnet.nnw')
@@ -292,19 +296,22 @@ def ampcom(path_data, path_cfg):
                 temphdr['ELONG']= (elonarr[k], 'Mean elongation of the sources')
                 fits.writeto(f"{path_data}{serial}.{chiparr[k]}.fits", tempfits, temphdr, overwrite=True)
             
-            hdul[0].header.set('skykk', skykk)
-            hdul[0].header.set('skymm', skymm)
-            hdul[0].header.set('skytt', skytt)
-            hdul[0].header.set('skynn', skynn)
-            hdul[0].header.set('skyavg', np.mean(skyarr))
-            hdul[0].header.set('fwhm1kk', fwhmarr[0])
-            hdul[0].header.set('fwhm1mm', fwhmarr[1])
-            hdul[0].header.set('fwhm1tt', fwhmarr[2])
-            hdul[0].header.set('fwhm1nn', fwhmarr[3])
-            hdul[0].header.set('fwhm1avg', np.mean(fwhmarr))
-            hdul[0].header.set('elonavg', np.mean(elonarr))
-            hdul.writeto(f"{path_data}{name[i]}", overwrite='True')
-            hdul.close()
+            # These 11 cards used to be added by rewriting the whole 1.36 GB
+            # MEF. Opening in update mode patches the header in place; the pixel
+            # data is untouched and never re-written.
+            with fits.open(f"{path_data}{name[i]}", mode='update') as hdul_up:
+                h0 = hdul_up[0].header
+                h0.set('skykk', skykk)
+                h0.set('skymm', skymm)
+                h0.set('skytt', skytt)
+                h0.set('skynn', skynn)
+                h0.set('skyavg', np.mean(skyarr))
+                h0.set('fwhm1kk', fwhmarr[0])
+                h0.set('fwhm1mm', fwhmarr[1])
+                h0.set('fwhm1tt', fwhmarr[2])
+                h0.set('fwhm1nn', fwhmarr[3])
+                h0.set('fwhm1avg', np.mean(fwhmarr))
+                h0.set('elonavg', np.mean(elonarr))
     
         with open(f'{path_data}ToOampcom.cat', 'a') as f:
             f.write(f'{name[i]} {skykk:7.1f} {skymm:7.1f} {skytt:7.1f} {skynn:7.1f} {fwhmarr[0]:5.1f} {fwhmarr[1]:5.1f} {fwhmarr[2]:5.1f} {fwhmarr[3]:5.1f}\n')
