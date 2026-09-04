@@ -6,14 +6,28 @@
 # observational data, external catalogues and per-site products. A pre-commit
 # hook enforces the same boundaries; see .git/hooks/pre-commit.
 # =============================================================================
-data/
 bin/
 GECKO/
-catalog/
 result/
 ignore/
 pipe/subtraction_out/
 pipe/legacy/
+
+# data/ and catalog/ each hold ONE tracked example asset, which forces git to
+# descend into them. A bare `data/` / `catalog/` would then stop matching the
+# thousands of real files inside, so exclude the contents explicitly and
+# re-include only the example on the way down.
+data/*
+!data/raw/
+data/raw/*
+!data/raw/example/
+data/raw/example/*
+!data/raw/example/kmtx.20240101.000000.fits
+
+catalog/*
+!catalog/gaiaxp/
+catalog/gaiaxp/*
+!catalog/gaiaxp/gaiaxp_0000.fits
 
 # Real/bogus classifier: the code is tracked, the trained weights are not
 # (196 MB of .bin checkpoints) -- see pipe/rbclass_kmtnet/README.md
@@ -60,3 +74,11 @@ build/
 dist/
 *.egg-info/
 .ipynb_checkpoints/
+
+# =============================================================================
+# Editor / tooling
+# =============================================================================
+.claude/
+.vscode/
+.idea/
+.DS_Store
