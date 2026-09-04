@@ -1,22 +1,57 @@
-# .gitignore
-
+# =============================================================================
+# Real data and site-specific trees -- NEVER commit.
+#
+# The repository root doubles as the live working directory on the KMTNet
+# reduction server (/data8/kmtntoo), so these directories hold multi-terabyte
+# observational data, external catalogues and per-site products. A pre-commit
+# hook enforces the same boundaries; see .git/hooks/pre-commit.
+# =============================================================================
 data/
-legacy/
-rbclass_kmtnet/
+bin/
+GECKO/
+catalog/
+result/
+ignore/
+pipe/subtraction_out/
+pipe/legacy/
+
+# Bulk/site-specific config products (the small text configs ARE tracked)
+config/badpixelmap/
+config/flag.fits
+config/badastrom.txt
+
+# Astrometry neighbour-ahead runtime cache (written per site/chip at run time)
+config/ahead/lastgood/
+
+# Optional per-site path overrides consumed by config/working_directory_structure.py
+config/local_settings.py
+
+# =============================================================================
+# Extension-based second line of defence
+# =============================================================================
 *.fits
 *.log
 *.cat
 *.png
 *.jpg
 *.npy
+*.head
+*.ldac
 
-# Python cache files
+# SExtractor-family XML logs dropped into the working directory
+sex.xml
+scamp.xml
+swarp.xml
+psfex.xml
+
+# =============================================================================
+# Python
+# =============================================================================
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
+*.py[cod]
 *.so
-
-# astrometry neighbour-ahead runtime cache
-config/ahead/lastgood/
+.Python
+build/
+dist/
+*.egg-info/
+.ipynb_checkpoints/
