@@ -66,6 +66,50 @@ path_res = PATHS['path_result']
 path_plot = PATHS['path_plot']
 path_log = PATHS['path_log']
 
+# STEP 4b: Optional per-site overrides
+# -------------------------------------
+# Some deployments need a path that cannot live inside the repository, most
+# often a shared reference-image archive mounted elsewhere on the machine.
+# Rather than hardcoding such a path in tracked code (which breaks the pipeline
+# for every other site), drop a gitignored config/local_settings.py next to this
+# file and define the names you want to override, e.g.
+#
+#     # config/local_settings.py
+#     path_tmpl = '/data8/KS4/database/stack/'
+#
+# Only names already present in PATHS are honoured; anything else is ignored so
+# a stray variable cannot silently invent a new path. A symlink works just as
+# well for a single directory (e.g. data/tmpl -> /data8/KS4/database/stack/) and
+# needs no override at all.
+# Loaded by explicit file path: this module is imported as
+# `config.working_directory_structure`, so config/ is not itself on sys.path.
+_local = None
+_local_path = os.path.join(config_dir, 'local_settings.py')
+if os.path.isfile(_local_path):
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location('kmtntoo_local_settings', _local_path)
+    _local = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_local)
+
+if _local is not None:
+    for _name in list(PATHS):
+        _override = getattr(_local, _name, None)
+        if _override:
+            PATHS[_name] = _override
+    # Refresh the module-level convenience variables from the merged PATHS
+    path_base = getattr(_local, 'path_base', path_base)
+    path_data = PATHS['path_data']
+    path_cfg = PATHS['path_config']
+    path_cat = PATHS['path_catalog']
+    path_raw = PATHS['path_raw']
+    path_scale = PATHS['path_scaled']
+    path_stack = PATHS['path_stack']
+    path_subt = PATHS['path_subt']
+    path_tmpl = PATHS['path_tmpl']
+    path_res = PATHS['path_result']
+    path_plot = PATHS['path_plot']
+    path_log = PATHS['path_log']
+
 # STEP 5: Directory creation function
 def create_directories(verbose=False):
     """
