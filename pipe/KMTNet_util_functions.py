@@ -80,6 +80,131 @@ def GAIAXP_query(field, path_ref):
 
     return refcat
 #------------------------------------------------------------
+def download_gaiaxp(field, path_ref, center, radius=1.5, timeout=180, overwrite=False, verbose=True):
+    """
+    Download Gaia DR3 synthetic Johnson-Kron-Cousins (JKC) BVRI photometry for a
+    KMTNet field and save it as ``gaiaxp_{field}.fits`` with the SAME schema as
+    the precomputed local Gaia-XP reference catalogues, so it is a drop-in
+    replacement when a field has no precomputed catalogue (e.g. custom ToO grid
+    fields).
+
+    Source table : gaiadr3.synthetic_photometry_gspc (Gaia Synthetic Photometry
+    Catalogue, GSPC) joined to gaiadr3.gaia_source for sky positions.
+
+    Columns written (identical to the local catalogues):
+        RA, DEC, cstar,
+        XP_B, XP_eB, XP_Bflag, XP_V, XP_eV, XP_Vflag,
+        XP_R, XP_eR, XP_Rflag, XP_I, XP_eI, XP_Iflag
+    where XP_e* are magnitude errors derived from the JKC flux and its error
+    (sigma_mag = 1.0857 * flux_error / flux) and XP_*flag = *_jkc_flag
+    (1 = source G mag and BP-RP colour lie in the GSPC validated range).
+
+    Parameters
+    ----------
+    field : str or int
+        KMTNet grid field id (used only for the output file name).
+    path_ref : str
+        Output directory for ``gaiaxp_{field}.fits`` (…/gaiaxp/).
+    center : astropy.coordinates.SkyCoord
+        Field centre for the cone search.
+    radius : float, optional
+        Cone-search radius in degrees (default 1.5; covers a 2x2 deg field).
+    timeout : float, optional
+        Hard wall-clock limit [s] for the Gaia query so the caller never hangs;
+        the call returns None if exceeded. Default 180.
+    overwrite : bool, optional
+        Re-download even if the target file already exists. Default False.
+
+    Returns
+    -------
+    str or None
+        Path to the written catalogue on success, otherwise None (network
+        error, timeout, no Gaia coverage, or write failure).
+    """
+    field   = str(field).split('.')[0].zfill(4)
+    os.makedirs(path_ref, exist_ok=True)
+    outpath = os.path.join(path_ref, f'gaiaxp_{field}.fits')
+    if os.path.exists(outpath) and not overwrite:
+        return outpath
+
+    ra0, dec0 = float(center.ra.deg), float(center.dec.deg)
+    adql = (
+        "SELECT g.ra, g.dec, s.c_star, "
+        "s.b_jkc_mag, s.b_jkc_flux, s.b_jkc_flux_error, s.b_jkc_flag, "
+        "s.v_jkc_mag, s.v_jkc_flux, s.v_jkc_flux_error, s.v_jkc_flag, "
+        "s.r_jkc_mag, s.r_jkc_flux, s.r_jkc_flux_error, s.r_jkc_flag, "
+        "s.i_jkc_mag, s.i_jkc_flux, s.i_jkc_flux_error, s.i_jkc_flag "
+        "FROM gaiadr3.synthetic_photometry_gspc AS s "
+        "JOIN gaiadr3.gaia_source AS g ON g.source_id = s.source_id "
+        f"WHERE 1=CONTAINS(POINT('ICRS', g.ra, g.dec), "
+        f"CIRCLE('ICRS', {ra0}, {dec0}, {float(radius)}))"
+    )
+
+    def _run_query():
+        from astroquery.gaia import Gaia
+        Gaia.ROW_LIMIT = -1
+        job = Gaia.launch_job_async(adql)   # async copes with large result sets
+        return job.get_results()
+
+    # Run the (network) query under a hard timeout so a slow/unreachable archive
+    # can never stall the pipeline.
+    try:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            res = pool.submit(_run_query).result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        if verbose:
+            print(f'  Gaia-XP download timed out after {timeout:.0f}s for field {field}.')
+        return None
+    except Exception as e:
+        if verbose:
+            print(f'  Gaia-XP download failed for field {field} ({type(e).__name__}: {e}).')
+        return None
+
+    if res is None or len(res) == 0:
+        if verbose:
+            print(f'  No Gaia synthetic photometry returned for field {field}.')
+        return None
+
+    # TAP may return aliases in either case; access columns case-insensitively.
+    cmap = {c.lower(): c for c in res.colnames}
+    def _col(name, fill=np.nan):
+        c = res[cmap[name]]
+        try:
+            return np.asarray(c.filled(fill))
+        except AttributeError:
+            return np.asarray(c)
+
+    out = Table()
+    out['RA']    = np.asarray(_col('ra'), dtype='f8')
+    out['DEC']   = np.asarray(_col('dec'), dtype='f8')
+    out['cstar'] = np.asarray(_col('c_star'), dtype='f8')
+    for band, key in (('B', 'b'), ('V', 'v'), ('R', 'r'), ('I', 'i')):
+        mag   = np.asarray(_col(f'{key}_jkc_mag'), dtype='f8')
+        flux  = np.asarray(_col(f'{key}_jkc_flux'), dtype='f8')
+        eflux = np.asarray(_col(f'{key}_jkc_flux_error'), dtype='f8')
+        with np.errstate(divide='ignore', invalid='ignore'):
+            emag = 1.0857 * eflux / flux
+        flag  = np.asarray(_col(f'{key}_jkc_flag', fill=0), dtype='i4')
+        out[f'XP_{band}']     = mag
+        out[f'XP_e{band}']    = emag
+        out[f'XP_{band}flag'] = flag
+
+    try:
+        out.write(outpath, format='fits', overwrite=True)
+        try:
+            os.chmod(outpath, 0o777)
+        except OSError:
+            pass
+    except Exception as e:
+        if verbose:
+            print(f'  Failed to write {outpath} ({type(e).__name__}: {e}).')
+        return None
+
+    if verbose:
+        print(f'  Gaia-XP catalogue downloaded: {os.path.basename(outpath)} ({len(out)} sources).')
+    return outpath
+#------------------------------------------------------------
 def sort_BVRI(imlist):
     newlist     = []
     ks4ftr  = ['B', 'V', 'R', 'I']

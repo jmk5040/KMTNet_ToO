@@ -13,7 +13,7 @@ from astropy.wcs import FITSFixedWarning
 warnings.simplefilter('ignore', category=FITSFixedWarning)
 #%% Import utility functions
 from KMTNet_util_functions import (
-    rss, apass_query, GAIAXP_query, sort_BVRI, limitmag, 
+    rss, apass_query, GAIAXP_query, download_gaiaxp, sort_BVRI, limitmag, 
     matching, star4zp, zpcal, add_colorbar, date2MJD, 
     MJD2date, create_ldac_fits, hotpants, invert_image, 
     mask2weight, generate_snapshot, rename_convention, 
@@ -318,7 +318,8 @@ def ampcom(path_data, path_cfg):
     return 0
 #%% ToOAstrometry.py
 def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet_grid.fits',
-           astrom_rms_max=1e-4, neighbour_fallback=True, neighbour_max_age_days=3.0):
+           astrom_rms_max=1e-4, neighbour_fallback=True, neighbour_max_age_days=3.0,
+           gaiaxp_download=True):
     """
     Astrometric calibration of KMTNet chip images using SCAMP.
     
@@ -349,6 +350,14 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
         Initial detection threshold for SExtractor. Default is 5.
     gridcat : str, optional
         Name of the KMTNet grid catalog file. Default is 'kmtnet_grid.fits'.
+    gaiaxp_download : bool, optional
+        If True (default), when a field has no precomputed local Gaia-XP
+        catalogue the function attempts to download the Gaia DR3 synthetic
+        Johnson-Kron-Cousins BVRI catalogue (GSPC) for that field and caches it
+        under ``path_cat/gaiaxp/``. If the download is unavailable, the frame
+        falls back to UCAC-4 (network); should that also fail/time out, the
+        frame is skipped after a single attempt instead of looping on repeated
+        network queries.
     
     Returns
     -------
@@ -515,6 +524,10 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
 
     chiparr = ['kk','mm','tt','nn']
 
+    # Fields whose on-demand Gaia-XP download has already been attempted this run
+    # (so a missing/failing field is not re-queried for every chip and frame).
+    attempted_gaiaxp = set()
+
     for i in range(len(info)):
 
         serial  = name[i][14:20]
@@ -545,8 +558,12 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
             else:             default_ahead = f'{path_cfg}ahead/kmtnet_global_ctio.{chip}.ahead'   # CTIO (Chile)
 
             # Reference catalogue: prefer the local Gaia-XP catalogue (works
-            # offline and is better centred on the Gaia frame than UCAC-4);
-            # fall back to UCAC-4 (network) only when no local catalogue exists.
+            # offline and is better centred on the Gaia frame than UCAC-4). When
+            # a field has no precomputed catalogue (e.g. custom ToO grid fields),
+            # try to download the Gaia synthetic JKC BVRI catalogue on demand.
+            # Only if that is unavailable do we fall back to UCAC-4 (network);
+            # a frame left with no usable reference catalogue is skipped after a
+            # single attempt rather than looped over repeated network timeouts.
             centcoord   = SkyCoord(ra[i], dec[i], unit=(u.hourangle, u.deg))
             try:
                 kmtgrid     = Table.read(os.path.join(path_cfg, gridcat), format='fits')
@@ -554,15 +571,30 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
                 kmtgrid     = Table.read(os.path.join(path_cfg, gridcat), format='ascii')
             kmtcoord    = SkyCoord(kmtgrid['ra[deg]'], kmtgrid['dec[deg]'], unit='deg')
             trgt_field  = kmtgrid[centcoord.separation(kmtcoord).argmin()]
-            gaiacat     = os.path.join(path_cat, 'gaiaxp', f'gaiaxp_{str(trgt_field["field_name1"]).zfill(4)}.fits')
+            fieldid     = str(trgt_field["field_name1"]).zfill(4)
+            # Grid (tile) centre from kmtnet_grid.fits for the matched field; the
+            # downloaded catalogue is centred here (not on the frame pointing).
+            fieldcoord  = SkyCoord(trgt_field['ra[deg]'], trgt_field['dec[deg]'], unit='deg')
+            gaiacat     = os.path.join(path_cat, 'gaiaxp', f'gaiaxp_{fieldid}.fits')
 
-            if os.path.exists(gaiacat):
+            if (not os.path.exists(gaiacat)) and gaiaxp_download and (fieldid not in attempted_gaiaxp):
+                attempted_gaiaxp.add(fieldid)
+                print(f'Local Gaia-XP catalogue not found for field {fieldid}; '
+                      f'attempting download from the Gaia archive...')
+                # Cone radius 1.5 deg fully encloses the 2x2 deg KMTNet tile
+                # (corner distance sqrt(2)=1.414 deg) centred on the grid field.
+                download_gaiaxp(fieldid, os.path.join(path_cat, 'gaiaxp'),
+                                center=fieldcoord, radius=max(radius, 1.5))
+
+            ref_is_local = os.path.exists(gaiacat)
+            if ref_is_local:
                 gaialdac = gaiacat.replace('.fits', '_ldac.fits')
                 if not os.path.exists(gaialdac):
                     create_ldac_fits(gaiacat, gaialdac, center=centcoord, radius=max(radius, 1.5))
                 refargs = f'-ASTREF_CATALOG FILE -ASTREFCAT_NAME {gaialdac}'
             else:
-                print(f'Local Gaia-XP catalogue not found for field {trgt_field["field_name1"]}; falling back to UCAC-4 (requires network).')
+                print(f'No local/downloadable Gaia-XP catalogue for field {fieldid}; '
+                      f'falling back to UCAC-4 (requires network).')
                 refargs = '-ASTREF_CATALOG UCAC-4'
 
             # Recovery ladder:
@@ -593,6 +625,14 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
                         _cache_lastgood_ahead(outhdr, lastgood_ahead)
                     except Exception as e:
                         print(f'(could not cache last-good ahead for {site}.{chip}: {e})')
+                    break
+
+                # With a network reference (UCAC-4) there is no point looping:
+                # raising DETECT_THRESH or seeding a neighbour just re-queries the
+                # (possibly timing-out) server. Skip the frame after one attempt.
+                if not ref_is_local:
+                    print(f'*** {serial}.{chip}: no usable reference catalogue '
+                          f'(Gaia-XP unavailable, UCAC-4 query failed/timed out); skipping. ***')
                     break
 
                 if repeat < 3:
