@@ -2105,11 +2105,18 @@ def zpscale(img, path_output, path_cfg, path_cat, path_plot, mode='1DLINEAR', ma
             
             print(f'AMP{i} Flux Scaling: {m:.2e} * y + {b:.2f}')
             # 5.5.3. Scaling factor array composite
-            for j in range(yaxis):
-                del_zp = zpscaled + linfun(j, m, b)
-                fratio = round(10**(del_zp/(2.5)), 4)
-                for k in np.arange(xps, xpe):
-                    imscale[j][int(k)] = fratio
+            # The scale factor varies only along y, so one column vector is
+            # broadcast across the amplifier's x range. This used to be a
+            # double Python loop -- 9232 x 1152 = 10.6M interpreted scalar
+            # assignments per amplifier, 85M per chip -- which is why the 1D
+            # linear branch ran slower than the 2D polynomial one below, even
+            # though it does strictly less fitting work. The 2D branch already
+            # assigns its grid in one shot (`imscale.T[xps:xpe] = fratio.T`).
+            # np.round matches the previous round(..., 4) exactly, including
+            # after the cast into the float32 array.
+            del_zp = zpscaled + linfun(np.arange(yaxis), m, b)
+            fratio = np.round(10**(del_zp/(2.5)), 4)
+            imscale[:, xps:xpe] = fratio[:, None]
             
             # 5.5.3. Fitting the result plot 
             if figure: 
