@@ -386,9 +386,10 @@ from watchdog.events import FileSystemEventHandler
 class TooWatcher(FileSystemEventHandler):
 
     # basics
-    def __init__(self, watch_directory, ncores):
+    def __init__(self, watch_directory, ncores, known_obj=None):
         self.watch_directory    = watch_directory
         self.ncores             = ncores
+        self.known_obj          = known_obj
         self.pool               = multiprocessing.Pool(processes=ncores)
 
     # creation checking sequences
@@ -480,9 +481,9 @@ class TooWatcher(FileSystemEventHandler):
                         shutil.move(src, dst)
                     # run the pipeline
                     if self.ncores == 1:
-                        ToO_pipeline(os.path.basename(process_directory))
+                        ToO_pipeline(os.path.basename(process_directory), known_obj=self.known_obj)
                     else:
-                        self.pool.apply_async(ToO_pipeline, args=(os.path.basename(process_directory),)) # working directories are defined inside the function
+                        self.pool.apply_async(ToO_pipeline, args=(os.path.basename(process_directory),), kwds={'known_obj': self.known_obj}) # working directories are defined inside the function
                 break
             elif self.is_new_file_generated(self.watch_directory, last_move_time):
                 break
@@ -588,7 +589,7 @@ if __name__ == "__main__":
 
         print('KMTNet ToO Data WatchDog Activated: Looking for kmtx.00000000.000000.fits')
         observer = Observer()
-        event_handler = TooWatcher(watch_directory, ncores)
+        event_handler = TooWatcher(watch_directory, ncores, known_obj=args.known_obj)
         observer.schedule(event_handler, watch_directory, recursive=False)
         observer.start()
 
