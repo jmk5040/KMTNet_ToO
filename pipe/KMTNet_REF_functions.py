@@ -989,3 +989,197 @@ def generate_panstarrs_reference(
     print(f"Process completed. Stacked image saved to: {path_outim}")
 
     return path_outim
+
+# %% SkyMapper Reference Image Generation with "PanStitch" (southern fields with no KS4/PS1 coverage)
+def get_skymapper_image_urls(ra_deg, dec_deg, size_deg, filte):
+    """
+    Queries the SkyMapper SIAP service to find a FITS image URL for a given pointing.
+
+    Parameters:
+      ra_deg (float): Right Ascension of the pointing in decimal degrees.
+      dec_deg (float): Declination of the pointing in decimal degrees.
+      size_deg (float): The size of the cutout to request in decimal degrees.
+      filte (str): The filter to use ('u', 'v', 'g', 'r', 'i', 'z').
+
+    Returns:
+      str: The first FITS download URL found, or None if no suitable image is found.
+    """
+    import csv
+    import requests
+    from io import StringIO
+
+    base_url = "https://api.skymapper.nci.org.au/public/siap/dr4/query"
+    params = {
+        'POS': f'{ra_deg},{dec_deg}',
+        'SIZE': f'{size_deg}',
+        'FORMAT': 'image/fits',
+        'BAND': filte,
+        'RESPONSEFORMAT': 'CSV',
+        'VERB': 1
+    }
+
+    try:
+        response = requests.get(base_url, params=params)
+        response.raise_for_status()
+
+        # The response is CSV, parse it to find the download URL
+        reader = csv.reader(StringIO(response.text))
+        header = next(reader)
+
+        # Find the index of the 'get_fits' column which contains the URL
+        try:
+            url_idx = header.index('get_fits')
+        except ValueError:
+            print("Warning: 'get_fits' column not found in SkyMapper response.")
+            return None
+
+        # Return the first URL found
+        for row in reader:
+            if row and len(row) > url_idx and row[url_idx].startswith('http'):
+                return row[url_idx]
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error querying SkyMapper API: {e}")
+
+    return None
+
+
+def generate_skymapper_reference(
+    field,
+    cra_hms,
+    cdec_dms,
+    path_output_base,
+    path_cfg,
+    filte='r',
+    xsize=22000,
+    ysize=22000,
+    pixscale=0.4,
+    n_grid=8,
+    m_grid=8,
+    margin_frac=0.0,
+    swarp_config='kmtnet.swarp'
+):
+    """
+    Generates a SkyMapper reference image for a given field using PanStitch.
+
+    .. warning::
+        The SkyMapper data service has a strict usage policy against systematic
+        harvesting of large sky areas. This function generates a grid of image
+        requests. Please use conservatively-sized grids (e.g., n_grid=8, m_grid=8)
+        to avoid being blocked by the service.
+
+    .. note::
+        Unlike generate_panstarrs_reference(), this path has not yet been
+        exercised end-to-end. It uses the PanStitch submodule API
+        (PanStitch.util / .downloader / .stitching) because SkyMapper slices are
+        fetched from SIAP URLs rather than from a Pan-STARRS image table.
+
+    Parameters:
+      field (str): The name of the target field (e.g., 'LMC').
+      cra_hms (str): The central Right Ascension in HMS format (e.g., '05:23:34.50').
+      cdec_dms (str): The central Declination in DMS format (e.g., '-69:45:22.0').
+      path_output_base (str): The base directory for all outputs.
+      path_cfg (str): The directory containing configuration files like the SWarp config.
+      filte (str): The filter to use ('u', 'v', 'g', 'r', 'i', 'z'). Default is 'r'.
+      xsize (int): The final desired image width in pixels. Default is 22000.
+      ysize (int): The final desired image height in pixels. Default is 22000.
+      pixscale (float): The desired pixel scale of the final image in arcsec/pixel. Default is 0.4.
+      n_grid (int): The number of grid points in the RA direction. Default is 8.
+      m_grid (int): The number of grid points in the Dec direction. Default is 8.
+      margin_frac (float): Fractional margin for downloading slices. Default is 0.0.
+      swarp_config (str): Name of the SWarp configuration file. Default is 'kmtnet.swarp'.
+
+    Returns:
+      str: The path to the final stitched FITS image, or None if no slice was found.
+    """
+    try:
+        import PanStitch
+    except ImportError:
+        raise ImportError(
+            "PanStitch package is required for SkyMapper reference image generation. "
+            "Install it with: pip install PanStitch"
+        )
+
+    print("--- Starting SkyMapper Reference Image Generation ---")
+
+    # --- 1. Define Paths and Parameters ---
+    path_output_field = os.path.join(path_output_base, field)
+    path_output_fits = os.path.join(path_output_field, filte, 'fits')
+    path_output_log = os.path.join(path_output_field, filte, 'log')
+    os.makedirs(path_output_fits, exist_ok=True)
+    os.makedirs(path_output_log, exist_ok=True)
+
+    # Convert center coordinates to degrees for pointing generation
+    coord = SkyCoord(cra_hms, cdec_dms, unit=(u.hourangle, u.deg))
+    cra_deg, cdec_deg = coord.ra.deg, coord.dec.deg
+
+    # --- 2. Generate Pointings ---
+    print(f"Generating {n_grid}x{m_grid} grid of pointings...")
+    pointings = PanStitch.util.generate_pointings(
+        cra_deg, cdec_deg, xsize, ysize, pixscale,
+        n=n_grid, m=m_grid, margin_frac=margin_frac
+    )
+    tra = [p[0] for p in pointings]
+    tdec = [p[1] for p in pointings]
+
+    # --- 3. Determine Slice Size and Get Image URLs ---
+    # Calculate the angular size needed for each slice download
+    angular_width_arcsec = xsize * pixscale * (1 + margin_frac)
+    slice_angular_size_arcsec = angular_width_arcsec / n_grid
+    slice_angular_size_deg = slice_angular_size_arcsec / 3600
+
+    print("Querying SkyMapper for image download URLs...")
+    image_urls = []
+    for ra, dec in zip(tra, tdec):
+        url = get_skymapper_image_urls(ra, dec, slice_angular_size_deg, filte)
+        if url:
+            image_urls.append(url)
+        else:
+            print(f"Warning: Could not find an image for pointing RA={ra}, Dec={dec}")
+
+    if not image_urls:
+        print("Error: No image URLs found for any pointing. Aborting.")
+        return None
+
+    # --- 4. Download Images ---
+    print(f"Downloading {len(image_urls)} image slices...")
+    PanStitch.downloader.download_images_for_pointings(
+        image_urls,
+        output_dir=path_output_fits,
+        n_processes=10
+    )
+
+    # --- 5. Run SWarp to Stitch Images ---
+    print("Stitching images with SWarp...")
+    output_fits_name = f'skymapper.{field}.{filte}.{xsize}x{ysize}.fits'
+    output_fits_path = os.path.join(path_output_field, filte, output_fits_name)
+
+    PanStitch.stitching.run_swarp(
+        input_dir=path_output_fits,
+        output_path=output_fits_path,
+        config_path=os.path.join(path_cfg, swarp_config),
+        center_hms=cra_hms,
+        center_dms=cdec_dms,
+        image_size_x=xsize,
+        image_size_y=ysize,
+        pixel_scale=pixscale,
+        log_path=os.path.join(path_output_log, 'swarp.log')
+    )
+
+    # --- 6. Update Header ---
+    # The original draft called an add_fwhm_to_header() helper that was never
+    # defined; mirror what generate_panstarrs_reference() writes instead.
+    print("Updating header...")
+    with fits.open(output_fits_path, 'update') as f:
+        for hdu in f:
+            hdu.header['OBJECT']    = f'{field}'
+            hdu.header['FILTER']    = filte.upper()
+            hdu.header['FWHM']      = 1.5
+            hdu.header['CENTRA']    = cra_hms
+            hdu.header['CENTDEC']   = cdec_dms
+
+    os.system(f'chmod 777 {output_fits_path}')
+    print(f"--- SkyMapper Reference Image Generation Complete ---")
+    print(f"Final image saved to: {output_fits_path}")
+
+    return output_fits_path
