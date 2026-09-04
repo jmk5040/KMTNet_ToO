@@ -32,12 +32,79 @@ from astropy.table import Table, vstack
 import KMTNet_ToO_functions as pipe
 import logging
 
+def _preflight():
+    """Fail loudly if a file the pipeline depends on is missing.
+
+    Several stages locate their inputs by plain string concatenation
+    (f'{path_cfg}kmtnet.swarp', f'{path_cfg}badpixelmap/...', and ~40 more).
+    When such a path is wrong the run does NOT crash: SWarp and SExtractor
+    print a one-line warning and silently fall back to internal defaults, and
+    BPM_update returns early. An unattended run then takes hours and produces
+    scientifically wrong output that looks superficially fine.
+
+    This check runs once at start-up and turns that silent degradation into an
+    immediate, named failure.
+    """
+    required = [
+        os.path.join(path_cfg, 'kmtnet.sex'),
+        os.path.join(path_cfg, 'kmtnet.param'),
+        os.path.join(path_cfg, 'kmtnet.conv'),
+        os.path.join(path_cfg, 'kmtnet.nnw'),
+        os.path.join(path_cfg, 'kmtnet.scamp'),
+        os.path.join(path_cfg, 'kmtnet.swarp'),
+        os.path.join(path_cfg, 'mask.swarp'),
+        os.path.join(path_cfg, 'kmtnet.psfex'),
+        os.path.join(path_cfg, 'kmtnet_psf.param'),
+        os.path.join(path_cfg, 'kmtnet_imask.param'),
+        os.path.join(path_cfg, 'kmtnet_grid.fits'),
+        os.path.join(path_cfg, 'badpixelmap'),
+        os.path.join(path_cfg, 'ahead'),
+        path_tmpl,
+        path_cat,
+    ]
+    missing = [f for f in required if not os.path.exists(f)]
+    if missing:
+        raise FileNotFoundError(
+            'Pipeline pre-flight failed; these inputs are missing:\n  '
+            + '\n  '.join(missing)
+            + '\n\nA wrong path here would not crash the run -- SWarp/SExtractor fall back '
+              'to internal defaults and BPM_update returns early -- so the pipeline stops now '
+              'instead of producing silently wrong output.'
+        )
+
+    # The concatenation style the stages actually use, exercised on one file.
+    probe = f'{path_cfg}kmtnet.swarp'
+    if not os.path.exists(probe):
+        raise FileNotFoundError(
+            f'Pre-flight: string concatenation produced a bad path: {probe}\n'
+            'path_cfg must end with a separator (see config/working_directory_structure.py).'
+        )
+    print('Pre-flight checks passed.')
+
+
 def ToO_pipeline(date, field_info='kmtnet_grid.fits', known_obj=None, **steps):
     
+    # process managements
+    # Every stage defaults to ON, but individual stages can be toggled by the user via the `steps` argument. 
+    _defaults = dict(
+        ampcompro=True, 
+        astrompro=True, 
+        astromqapro=True, 
+        zpscalepro=True,
+        bpmaskpro=True, 
+        stackingpro=True, 
+        qa4stackpro=True, 
+        catalogpro=True,
+        subtpro=True, 
+        rbclasspro=True,
+    )
+
     # start of the process
     start = time.time()
     print(f'KMTNet ToO Pipeline Starts for {date}.')
     print(f'Field/Tiling coordinate information referring to {field_info}.')
+
+    _preflight()
 
     # Optional list of known targets (e.g. gravitational-wave host-galaxy
     # candidates or already-known transients) whose matching detections must
@@ -52,15 +119,6 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits', known_obj=None, **steps):
             print(f'*** known-obj CSV not found: {known_obj_path}. Continuing without forced snapshots. ***')
             known_obj_path = None
     
-    # process managements
-    # Every stage defaults to ON, but individual stages can be toggled by the
-    # caller, e.g. ToO_pipeline('20250212_CTIO', ampcompro=False, astrompro=False)
-    # to resume from already-calibrated chip images. Unknown keys raise early.
-    _defaults = dict(
-        ampcompro=True, astrompro=True, astromqapro=True, zpscalepro=True,
-        bpmaskpro=True, stackingpro=True, qa4stackpro=True, catalogpro=True,
-        subtpro=True, rbclasspro=True,
-    )
     unknown = set(steps) - set(_defaults)
     if unknown:
         raise TypeError(f'ToO_pipeline got unexpected step flag(s): {sorted(unknown)}')

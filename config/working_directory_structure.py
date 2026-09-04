@@ -51,9 +51,30 @@ PATHS = {}
 for name, relative_path in DIRECTORIES.items():
     PATHS[f'path_{name}'] = os.path.join(BASE_PATH, relative_path)
 
+
+def _as_dir(p):
+    """Return ``p`` with a guaranteed trailing separator.
+
+    The pipeline builds many of its paths by plain f-string concatenation --
+    ``f'{path_cfg}badpixelmap/...'``, ``f'-c {path_cfg}kmtnet.swarp'``,
+    ``f'{path_cfg}ahead/kmtnet_global_ctio.{chip}.ahead'`` and ~40 more --
+    which silently produces '/data8/kmtntoo/configkmtnet.swarp' when the value
+    has no trailing '/'. Those failures do not raise: SExtractor and SWarp fall
+    back to internal defaults and BPM_update returns early, so the run completes
+    while quietly ignoring the tuned configuration.
+
+    A trailing separator is equally correct for os.path.join(), os.makedirs()
+    and os.path.exists(), so normalising here fixes every concatenation site at
+    once without touching call sites.
+    """
+    return p if p.endswith(os.sep) else p + os.sep
+
+
+PATHS = {k: _as_dir(v) for k, v in PATHS.items()}
+
 # STEP 4: Create individual path variables for easy access
 # These variables can be imported directly by other scripts
-path_base = BASE_PATH
+path_base = _as_dir(BASE_PATH)
 path_data = PATHS['path_data']
 path_cfg = PATHS['path_config']
 path_cat = PATHS['path_catalog']
@@ -96,8 +117,10 @@ if _local is not None:
         _override = getattr(_local, _name, None)
         if _override:
             PATHS[_name] = _override
+    # Overrides go through the same normalisation as the defaults
+    PATHS = {k: _as_dir(v) for k, v in PATHS.items()}
     # Refresh the module-level convenience variables from the merged PATHS
-    path_base = getattr(_local, 'path_base', path_base)
+    path_base = _as_dir(getattr(_local, 'path_base', path_base))
     path_data = PATHS['path_data']
     path_cfg = PATHS['path_config']
     path_cat = PATHS['path_catalog']
