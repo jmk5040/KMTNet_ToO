@@ -694,7 +694,7 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
     return 0
 #%% ToOAstrometryQA.py
 def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, crreject=True, bleedreject=True, weightmap=True, imtype='chip',
-           qa_edge_ring=1, qa_max_edge_bad=2):
+           qa_edge_ring=1, qa_max_edge_bad=2, qa_min_good_frac=0.6, qa_max_rms=0.5, qa_min_match=100):
     """
     Quality Assurance (QA) test for astrometric calibration of KMTNet images.
     
@@ -781,7 +781,24 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
     ----------------
     - **Good Section**: Detection ratio > 0.6 and RMS alignment < 0.5 arcsec
     - **Bad Section**: Detection ratio ≤ 0.6 or RMS alignment ≥ 0.5 arcsec
-    - **Overall QA Pass**: ≤ 2 bad sections, ≤ 10 empty sections, median offset < 0.4 arcsec
+    - **Overall QA Pass** (global solution based): the chip passes when
+      ``n_match >= qa_min_match`` reference stars were matched, the matched RMS
+      offset is ``< qa_max_rms`` arcsec, and the fraction of *populated*
+      sections classified as good is ``>= qa_min_good_frac``. A few poorly
+      solved field corners no longer reject an otherwise sound frame.
+
+    QA tuning parameters
+    --------------------
+    qa_min_good_frac : float, optional
+        Minimum fraction of populated (non-empty) sections that must be good
+        for the chip to pass. Default is 0.6.
+    qa_max_rms : float, optional
+        Maximum allowed reference-matched RMS offset [arcsec]. Default is 0.5.
+    qa_min_match : int, optional
+        Minimum number of matched reference stars required. Default is 100.
+    qa_edge_ring, qa_max_edge_bad : optional
+        Retained for backward compatibility / edge diagnostics only; they no
+        longer gate the pass/fail decision.
     
     Header Keywords Added
     ---------------------
@@ -1390,36 +1407,48 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
         bad_sect = [i for i, x in enumerate(gbmap_row) if x == 'bad']
         empty_sect = [i for i, x in enumerate(gbmap_row) if x == 'empty']
 
-        # Pass/fail is decided ONLY from the sections lying on the outermost
-        # `qa_edge_ring` ring(s) of the divnum x divnum grid. Interior sections are
-        # almost always well solved (dense star coverage, well-constrained central
-        # WCS), so they carry little diagnostic value and are deliberately ignored.
-        # A poor astrometric/registration solution shows up first at the field
-        # edges and corners, so QA scrutiny is focused there: the chip is rejected
-        # once `qa_max_edge_bad` or more EDGE sections are flagged bad. The full
-        # good/bad section map is still stored in the header for diagnostics.
-        def _is_edge(k):
-            i, j = k % divnum, k // divnum
-            return (i < qa_edge_ring or i >= divnum - qa_edge_ring or
-                    j < qa_edge_ring or j >= divnum - qa_edge_ring)
-        edge_bad = [k for k in bad_sect if _is_edge(k)]
-
+        # Global registration metrics from the reference-matched, clipped sample.
         if len(csep) > 0:
             med_off = float(median(csep))
             rms_off = float(sqrt(mean(csep**2)))
         else:
             med_off, rms_off = 99.0, 99.0
 
-        good_solution = (len(edge_bad) < qa_max_edge_bad)
+        # Fraction of *populated* sections that are well solved. Empty sections
+        # (no detections, e.g. masked corners or chip gaps) are not astrometric
+        # failures and are deliberately excluded from the denominator.
+        n_good      = gbmap_row.count('good')
+        n_nonempty  = n_good + len(bad_sect)
+        good_frac   = (n_good / n_nonempty) if n_nonempty > 0 else 0.0
+
+        # Edge diagnostics retained for the log/header (no longer the sole gate).
+        def _is_edge(k):
+            i, j = k % divnum, k // divnum
+            return (i < qa_edge_ring or i >= divnum - qa_edge_ring or
+                    j < qa_edge_ring or j >= divnum - qa_edge_ring)
+        edge_bad = [k for k in bad_sect if _is_edge(k)]
+
+        # A chip is accepted on the strength of its GLOBAL solution rather than on
+        # a couple of poorly solved field corners: it passes when enough reference
+        # stars were matched, the matched RMS offset is small, and the large
+        # majority of populated sections are well solved. This keeps frames with a
+        # sound WCS (small RMS, high good fraction) that the previous edge-only
+        # veto rejected on sparse corners, while still failing genuinely bad
+        # solutions (too few matches, large RMS, or bad sections everywhere).
+        good_solution = (
+            (len(csep) >= qa_min_match) and
+            (rms_off < qa_max_rms) and
+            (good_frac >= qa_min_good_frac)
+        )
         fastrom = 'good' if good_solution else 'bad'
         badamp_ls = [[j+i*8 for i in range(8)] for j in range(8)]
         badamp_bl = True if empty_sect in badamp_ls else False
         result = [fname, fastrom, bad_sect]
 
         print(f'  QA: n_match={len(csep)}, median_off={med_off:.3f}", rms={rms_off:.3f}", '
-              f'good_sect={gbmap_row.count("good")}/{divnum**2}, '
-              f'edge_bad={len(edge_bad)}/{len([1 for k in range(divnum**2) if _is_edge(k)])} '
-              f'(ring={qa_edge_ring}, interior ignored)')
+              f'good_sect={n_good}/{divnum**2}, good_frac={good_frac:.2f}, '
+              f'edge_bad={len(edge_bad)} '
+              f'(pass if n_match>={qa_min_match}, rms<{qa_max_rms}", good_frac>={qa_min_good_frac})')
         Msg.qaresult(fastrom)
 
         if fastrom == 'bad' :
