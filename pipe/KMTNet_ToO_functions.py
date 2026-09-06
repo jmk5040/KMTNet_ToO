@@ -1726,7 +1726,7 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
         Msg.err(fname, 'fpatherr')
     Msg.end()
 #%% ToOZeroPointScaler.py
-def zpscale(img, path_output, path_cfg, path_cat, path_plot, mode='1DLINEAR', magkey='AUTO', zpscaled=30.0, pixscale=0.4, gain=1, figure=False, start=None, gridcat='kmtnet_grid.cat'):
+def zpscale(img, path_output, path_cfg, path_cat, path_plot, mode='1DLINEAR', magkey='AUTO', zpscaled=30.0, pixscale=0.4, gain=1, figure=False, start=None, gridcat='kmtnet_grid.cat', threads=1):
     """
     Zero-point calibration and homogenization for KMTNet chip images.
     
@@ -1987,7 +1987,9 @@ def zpscale(img, path_output, path_cfg, path_cat, path_plot, mode='1DLINEAR', ma
         prompt_wgt  = f' -WEIGHT_TYPE MAP_WEIGHT -WEIGHT_IMAGE {img.replace(".fits", ".weight.fits")} -RESCALE_WEIGHTS Y -WEIGHT_GAIN Y'
     else:
         prompt_wgt = ''
-    prompt      = 'source-extractor '+inim_single+prompt_cfg+prompt_aper+prompt_opt+prompt_cat+prompt_chk+prompt_flg+prompt_bkg+prompt_wgt
+    # Explicit: kmtnet.sex's own NTHREADS would otherwise be multiplied by the
+    # number of workers this stage runs.
+    prompt      = 'source-extractor '+inim_single+prompt_cfg+prompt_aper+prompt_opt+prompt_cat+prompt_chk+prompt_flg+prompt_bkg+prompt_wgt+f' -NTHREADS {threads}'
     if os.path.exists(img.replace(".fits", ".astromqa.cat")) and os.path.exists(mbkgname):
         shutil.move(img.replace(".fits", ".astromqa.cat"), catname)
     else:
@@ -2398,7 +2400,7 @@ def BPM_update(img, path_cfg):
     
     return
 #%% ToOImageStackter.py
-def stacking(filename_convention, path_input, path_output, path_cfg, path_ref, combinetype='MEDIAN', start=None, gridcat='kmtnet_grid.cat'):
+def stacking(filename_convention, path_input, path_output, path_cfg, path_ref, combinetype='MEDIAN', start=None, gridcat='kmtnet_grid.cat', threads=1, memmax=2048):
     """
     Image stacking function for KMTNet chip images using SWarp.
     
@@ -2526,6 +2528,7 @@ def stacking(filename_convention, path_input, path_output, path_cfg, path_ref, c
     - Reference/template images should be available for coordinate alignment
     """
     import numpy as np
+    import shutil
     import os, re, time, glob
     import astropy.units as u
     from astropy.wcs import WCS
@@ -2617,7 +2620,16 @@ def stacking(filename_convention, path_input, path_output, path_cfg, path_ref, c
                     imgs    = glob.glob(f'{ff}*scaled.fits')
                     imlist.extend(imgs)
                 imlist  = sorted(imlist)
-                f = open(f'{path_input}diths.list', 'w')
+                # Unique per stack: SWarp's input list, resample files and VMEM swap
+                # all used fixed names in a shared directory, so two concurrent
+                # stacks would overwrite each other. RESAMPLE_DIR/VMEM_DIR are '.'
+                # in the config, which put hundreds of MB into whatever directory
+                # the pipeline happened to be launched from.
+                _tag = os.path.basename(stack).replace('.fits', '')
+                _scratch = os.path.join(path_output, f'.swarp_{_tag}')
+                os.makedirs(_scratch, exist_ok=True)
+                _dithlist = os.path.join(_scratch, 'diths.list')
+                f = open(_dithlist, 'w')
                 for j in imlist:
                     f.write(j+'\n')
                 f.close()
@@ -2639,11 +2651,11 @@ def stacking(filename_convention, path_input, path_output, path_cfg, path_ref, c
                     for mfit in mfits:
                         wdata = (fits.getdata(mfit) == 0).astype(int)
                         fits.writeto(mfit.replace('.mask.fits', '.scaled.weight.fits'), wdata, overwrite=True)
-                    os.system(f'swarp @{path_input}diths.list -c {path_cfg}kmtnet.swarp -IMAGEOUT_NAME {stack} -WEIGHTOUT_NAME {weight} -CENTER {centra},{centdec} -IMAGE_SIZE 22000,22000 -WEIGHT_TYPE MAP_WEIGHT -COMBINE_TYPE {combinetype} -BLANK_BADPIXELS Y -INTERPOLATE Y') 
+                    os.system(f'swarp @{_dithlist} -c {path_cfg}kmtnet.swarp -IMAGEOUT_NAME {stack} -WEIGHTOUT_NAME {weight} -CENTER {centra},{centdec} -IMAGE_SIZE 22000,22000 -WEIGHT_TYPE MAP_WEIGHT -COMBINE_TYPE {combinetype} -BLANK_BADPIXELS Y -INTERPOLATE Y -RESAMPLE_DIR {_scratch} -VMEM_DIR {_scratch} -NTHREADS {threads} -MEM_MAX {memmax} -COMBINE_BUFSIZE {memmax}') 
                 else:
-                    os.system(f'swarp @{path_input}diths.list -c {path_cfg}kmtnet.swarp -IMAGEOUT_NAME {stack} -WEIGHTOUT_NAME {weight} -CENTER {centra},{centdec} -IMAGE_SIZE 22000,22000 -COMBINE_TYPE {combinetype}') 
+                    os.system(f'swarp @{_dithlist} -c {path_cfg}kmtnet.swarp -IMAGEOUT_NAME {stack} -WEIGHTOUT_NAME {weight} -CENTER {centra},{centdec} -IMAGE_SIZE 22000,22000 -COMBINE_TYPE {combinetype} -RESAMPLE_DIR {_scratch} -VMEM_DIR {_scratch} -NTHREADS {threads} -MEM_MAX {memmax} -COMBINE_BUFSIZE {memmax}') 
                 os.system(f'rm {weight}')
-                os.system(f'rm {path_input}diths.list')
+                os.system(f'rm -f {_dithlist}')
                 
                 # header updates
                 with fits.open(stack, 'update') as f:
@@ -2674,7 +2686,8 @@ def stacking(filename_convention, path_input, path_output, path_cfg, path_ref, c
                 # 3.5. WCS info update for masks
                 masks  = [f for f in mfits if os.path.basename(f).split('.')[0].split('_')[1]==field and os.path.basename(f).split('.')[2]==band and os.path.basename(f).split('.')[4]==observ]
                 if len(masks) != 0:
-                    f = open(f'{path_input}mdiths.list', 'w')
+                    _mdithlist = os.path.join(_scratch, 'mdiths.list')
+                    f = open(_mdithlist, 'w')
                     for mask in masks:
                         im  = mask.replace('mask', 'scaled')
                         hdu = fits.PrimaryHDU(fits.getdata(mask), header=fits.getheader(im)+WCS(im).to_header())
@@ -2685,9 +2698,10 @@ def stacking(filename_convention, path_input, path_output, path_cfg, path_ref, c
                     # 3.7. SWarp for mask
                     mstack = stack.replace('.stack.fits', '.mstack.fits')
                     mweight = weight.replace('.weight.fits', '.mweight.fits')
-                    os.system(f'swarp @{path_input}mdiths.list -c {path_cfg}mask.swarp -IMAGEOUT_NAME {mstack} -WEIGHTOUT_NAME {mweight} -CENTER {centra},{centdec} -IMAGE_SIZE 22000,22000')
+                    os.system(f'swarp @{_mdithlist} -c {path_cfg}mask.swarp -IMAGEOUT_NAME {mstack} -WEIGHTOUT_NAME {mweight} -CENTER {centra},{centdec} -IMAGE_SIZE 22000,22000 -RESAMPLE_DIR {_scratch} -VMEM_DIR {_scratch} -NTHREADS {threads} -MEM_MAX {memmax} -COMBINE_BUFSIZE {memmax}')
                     os.system(f'rm {mweight}')
-                    os.system(f'rm {path_input}mdiths.list')
+                    os.system(f'rm -f {_mdithlist}')
+                    shutil.rmtree(_scratch, ignore_errors=True)
                 else:
                     mstack = f'{path_cfg}ks4.empty.mask.fits'
                 
@@ -3043,7 +3057,7 @@ def catalogmaker(cat, path_output, path_cat, flagcut=0, pixscale=0.4, clsstar=0.
 
     return 0
 #%% ToOTransientSearch.py
-def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_config, div_col=4, div_row=4, pixscale=0.4, ncore=1, detect=1.5, cutsize=1.0, twoway_subt=False, psf_analysis=False, reuse_dia=False, known_obj=None):
+def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_config, div_col=4, div_row=4, pixscale=0.4, ncore=1, detect=1.5, cutsize=1.0, twoway_subt=False, psf_analysis=False, reuse_dia=False, known_obj=None, threads=1):
     """
     Image subtraction and transient candidate detection for KMTNet stacked images.
     
@@ -3239,26 +3253,23 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
 
     # reference image
     pattern_ks4 = os.path.join(path_ref, f'{field}.{radec}', f'ks4*{band}*.stack.fits')
+    pattern_ps1 = os.path.join(path_ref, f'{field}.{radec}', f'ps1*{band}*.stack.fits')
     refimg = find_longest_exposure_image(pattern_ks4)
 
-    if refimg is None and int(radec[-3:]) >= -30: 
-        # PS1 reference image is available for above declination -30
-        pattern_ps1 = os.path.join(path_ref, f'{field}.{radec}', f'ps1*{band}*.stack.fits')
+    # Pan-STARRS reaches down to declination -30. Both patterns are built up
+    # front: pattern_ps1 used to be assigned inside the branch below and then
+    # printed in the else, so a southern field with no KS4 template raised
+    # NameError instead of saying what was missing.
+    #
+    # Only an already-built PS1 stack is used. Generating one on demand is not
+    # reliable enough to run unattended -- it needs the PanStitch package and a
+    # long series of archive downloads -- so a field without a template is
+    # reported and skipped, and the Real/Bogus stage carries the load instead.
+    dec_deg = int(radec[-3:])
+    reason  = 'reference/mask set incomplete'      # replaced below if we know better
+    if refimg is None and dec_deg >= -30:
         refimg = find_longest_exposure_image(pattern_ps1)
-        if refimg is None:
-            try:
-                from KMTNet_REF_functions import generate_panstarrs_reference
-                refimg = generate_panstarrs_reference(
-                    field=f"{field}.{radec}",
-                    cra=fits.getheader(sciimg)['CENTRA'],
-                    cdec=fits.getheader(sciimg)['CENTDEC'],
-                    path_output=os.path.join(path_ref, f"{field}.{radec}"),
-                    path_cfg=path_config,
-                    filte=band
-                )
-            except:
-                print(f"Failed to generate Pan-STARRS reference image for {field}.{radec} {band}-band")
-        
+
     if refimg:
         print(f"Reference image: \n{os.path.basename(refimg)}")
         # mask image
@@ -3274,11 +3285,18 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
                         header=fits.getheader(sciimg)).writeto(maskimg, overwrite=True)
         print(f"Mask image: \n{os.path.basename(maskimg)}")
     else:
-        print(f'No suitable reference image found. Checked patterns: \n{pattern_ks4}\n{pattern_ps1}')
+        maskimg = None
+        if dec_deg >= -30:
+            reason = 'no KS4 or Pan-STARRS reference'
+            print(f'No suitable reference image found. Checked patterns: \n{pattern_ks4}\n{pattern_ps1}')
+        else:
+            reason = f'out of Pan-STARRS coverage (dec {dec_deg:+d}), no KS4 reference'
+            print(f'{field}.{radec} {band}-band: {reason}. Checked: \n{pattern_ks4}')
 
-    if (sciimg is None) or (refimg is None) or (not os.path.isfile(maskimg)):
+    if (sciimg is None) or (refimg is None) or (maskimg is None) or (not os.path.isfile(maskimg)):
         print('The image set of science, referernce and mask images is not ready.')
-        return 0
+        raise FileNotFoundError(
+            f'{field}.{radec} {band}-band: {reason}')
 
     # science image photometric catalog --> HOTPANTs subtraction stamps
     # science image catalog
@@ -3401,11 +3419,11 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
 
     if psf_analysis==True:
         os.system(build_sex_command(
-            SUBTIMG, conf_sex, os.path.join(path_config, 'kmtnet.param'), conf_conv, conf_nnw, detect=20, fwhm=fits.getheader(SCIIMG).get("FWHM"), mask=MASKIMG, weight=WEIGHTIMG, extra_args={"CATALOG_TYPE": "FITS_LDAC"}))
+            SUBTIMG, conf_sex, os.path.join(path_config, 'kmtnet.param'), conf_conv, conf_nnw, detect=20, fwhm=fits.getheader(SCIIMG).get("FWHM"), mask=MASKIMG, weight=WEIGHTIMG, extra_args={"-CATALOG_TYPE": "FITS_LDAC", "-NTHREADS": str(threads)}))
         if os.path.isfile(SCIIMG.replace('.fits', '.cat')):
-            os.system(f'psfex {SCIIMG.replace(".fits", ".cat")} -c {path_config}kmtnet.psfex')
+            os.system(f'psfex {SCIIMG.replace(".fits", ".cat")} -c {path_config}kmtnet.psfex -NTHREADS {threads} -WRITE_XML N')
             os.system(build_sex_command(
-                SUBTIMG, conf_sex, {os.path.join(path_config, "kmtnet_psf.param")}, conf_conv, conf_nnw, detect, fwhm=fits.getheader(SCIIMG).get("FWHM"), mask=MASKIMG, weight=WEIGHTIMG, extra_args={"PSF_NAME": SCIIMG.replace(".fits", ".psf")}
+                SUBTIMG, conf_sex, os.path.join(path_config, "kmtnet_psf.param"), conf_conv, conf_nnw, detect, fwhm=fits.getheader(SCIIMG).get("FWHM"), mask=MASKIMG, weight=WEIGHTIMG, extra_args={"-PSF_NAME": SCIIMG.replace(".fits", ".psf"), "-NTHREADS": str(threads)}
             ))
             subtbl      = ascii.read(SUBTIMG.replace(".fits", ".psf.cat"))
     else:
@@ -3417,13 +3435,13 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
         # everywhere else an ASCII catalogue is read back.
         _subcat = SUBTIMG.replace(".fits", ".cat")
         if not (reuse_dia and os.path.isfile(_subcat)):
-            os.system(build_sex_command(SUBTIMG, conf_sex, conf_param, conf_conv, conf_nnw, detect, fwhm=fits.getheader(SCIIMG).get("FWHM"), mask=MASKIMG, weight=WEIGHTIMG, extra_args={"-CATALOG_TYPE": "ASCII_HEAD"}))
+            os.system(build_sex_command(SUBTIMG, conf_sex, conf_param, conf_conv, conf_nnw, detect, fwhm=fits.getheader(SCIIMG).get("FWHM"), mask=MASKIMG, weight=WEIGHTIMG, extra_args={"-CATALOG_TYPE": "ASCII_HEAD", "-NTHREADS": str(threads)}))
         subtbl      = ascii.read(_subcat)
     INV_SUBTIMG = SUBTIMG.replace("hd", "invhd")
     _invcat = INV_SUBTIMG.replace(".fits", ".cat")
     if not (reuse_dia and os.path.isfile(_invcat)):
         invert_image(inim=SUBTIMG, outim=INV_SUBTIMG)
-        os.system(build_sex_command(INV_SUBTIMG, conf_sex, conf_param, conf_conv, conf_nnw, detect, fwhm=fits.getheader(SCIIMG).get("FWHM"), mask=MASKIMG, weight=WEIGHTIMG, extra_args={"-CATALOG_TYPE": "ASCII_HEAD"}))
+        os.system(build_sex_command(INV_SUBTIMG, conf_sex, conf_param, conf_conv, conf_nnw, detect, fwhm=fits.getheader(SCIIMG).get("FWHM"), mask=MASKIMG, weight=WEIGHTIMG, extra_args={"-CATALOG_TYPE": "ASCII_HEAD", "-NTHREADS": str(threads)}))
     invsubtbl   = ascii.read(_invcat)
 
     print(f"# Number of sources: {len(subtbl)}")

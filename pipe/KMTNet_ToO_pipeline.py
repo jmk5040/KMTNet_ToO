@@ -59,16 +59,168 @@ import logging
 def _run_qatest(img, path_cfg, path_cat, field_info, threads):
     """One chip's astrometry QA. Module level so multiprocessing can pickle it.
 
-    Failures are caught here rather than in the parent: one bad chip should not
-    take down the pool, and the surviving chips still stack.
+    Failures are caught here rather than in the parent -- one bad chip should
+    not take down the pool -- but the reason is returned so it reaches the run
+    log instead of only the terminal.
+
+    Returns (img, ok, reason).
     """
     try:
         pipe.qatest(img, configdir=path_cfg, refcatdir=path_cat, refcatname='gaiaxp',
                     gridcat=field_info, crreject=True, bleedreject=True,
                     weightmap=True, imtype='chip', threads=threads)
+        return img, True, ''
     except Exception as e:
         print(f'*** astromqa failed for {os.path.basename(img)}: {e}. Skipping this chip. ***')
-    return img
+        return img, False, f'{type(e).__name__}: {e}' 
+
+
+class RunLog:
+    """Per-stage record of what happened, not just how long it took.
+
+    The old log had three columns -- process, frames, time -- so a stage that
+    quietly did nothing was indistinguishable from one that worked. Run 1 of
+    250831_SAAO recorded `bpmaskpro 27` where 156 chips were expected and
+    `stackingpro 0`, and nothing said why. Anything that went wrong had to be
+    dug out of the terminal scrollback, which for an unattended run is gone.
+
+    Two files are written next to each other:
+
+      ToOprocess_<date>_<ts>.log   one row per stage: status, item counts,
+                                   elapsed and cumulative seconds, a note
+      ToOissues_<date>_<ts>.log    one row per item that failed or was skipped,
+                                   with the reason
+
+    `elapsed` is the stage's own cost; the old `time` column was cumulative, so
+    reading a single stage's cost meant differencing consecutive rows by hand.
+    Both are kept.
+    """
+
+    def __init__(self, path_summary, path_issues, start):
+        self.path_summary = path_summary
+        self.path_issues = path_issues
+        self.start = start
+        self.rows = []
+        self.issues = []
+        self._mark = start
+
+    def skip(self, process):
+        """A stage that was switched off."""
+        self.rows.append(dict(process=process, status='off', items=0, ok=0,
+                              failed=0, skipped=0, elapsed=0.0,
+                              cumulative=round(time.time() - self.start, 2), note=''))
+        self._mark = time.time()
+        self.write()
+
+    def record(self, process, items, failures=(), skips=(), note=''):
+        """Close out a stage.
+
+        failures : iterable of (item, reason) that errored
+        skips    : iterable of (item, reason) deliberately not processed
+        """
+        now = time.time()
+        failures, skips = list(failures), list(skips)
+        ok = max(0, items - len(failures) - len(skips))
+        if items == 0:
+            status = 'empty'
+        elif failures:
+            status = 'failed' if ok == 0 else 'partial'
+        elif skips:
+            status = 'partial' if ok else 'skipped'
+        else:
+            status = 'done'
+        self.rows.append(dict(
+            process=process, status=status, items=items, ok=ok,
+            failed=len(failures), skipped=len(skips),
+            elapsed=round(now - self._mark, 2),
+            cumulative=round(now - self.start, 2), note=note))
+        for item, reason in failures:
+            self.issues.append(dict(process=process, kind='FAILED',
+                                    item=os.path.basename(str(item)), reason=str(reason)))
+        for item, reason in skips:
+            self.issues.append(dict(process=process, kind='SKIPPED',
+                                    item=os.path.basename(str(item)), reason=str(reason)))
+        self._mark = now
+        self.write()
+        line = (f"{process}: {status} -- {ok}/{items} ok"
+                + (f", {len(failures)} failed" if failures else '')
+                + (f", {len(skips)} skipped" if skips else '')
+                + f" ({self.rows[-1]['elapsed']:.1f}s)")
+        print(line)
+
+    def write(self):
+        if self.rows:
+            Table(rows=self.rows, names=list(self.rows[0])).write(
+                self.path_summary, format='ascii.fixed_width_two_line', overwrite=True)
+        if self.issues:
+            Table(rows=self.issues, names=list(self.issues[0])).write(
+                self.path_issues, format='ascii.fixed_width_two_line', overwrite=True)
+
+    def summary(self):
+        nf = sum(r['failed'] for r in self.rows)
+        ns = sum(r['skipped'] for r in self.rows)
+        return (f"{len(self.rows)} stage(s), {nf} failed item(s), {ns} skipped item(s). "
+                f"Details: {self.path_issues if self.issues else '(none)'}")
+
+
+def _run_zpscale(img, path_output2, path_cfg, path_cat, path_plot, field_info, start, threads):
+    """Zero-point scale one chip, then move its mask alongside the output."""
+    try:
+        pipe.set_thread_limits(threads)
+        outname = pipe.zpscale(img, path_output2, path_cfg, path_cat, path_plot,
+                               zpscaled=30.0, figure=False, start=start, gridcat=field_info,
+                               threads=threads)
+        if outname is not None and os.path.exists(img.replace('.fits', '.mask.fits')):
+            os.rename(img.replace('.fits', '.mask.fits'),
+                      os.path.join(path_output2, outname.replace('.scaled.', '.mask.')))
+        return img, True, ''
+    except Exception as e:
+        print(f'*** zpscale failed for {os.path.basename(img)}: {e}. Skipping this chip. ***')
+        return img, False, f'{type(e).__name__}: {e}'
+
+
+def _run_stackqa(simg, path_cfg, path_cat, field_info, threads):
+    try:
+        pipe.qatest(simg, configdir=path_cfg, refcatdir=path_cat, refcatname='gaiaxp',
+                    gridcat=field_info, crreject=False, bleedreject=False,
+                    weightmap=True, imtype='stack', threads=threads)
+        return simg, True, ''
+    except Exception as e:
+        print(f'*** stack QA failed for {os.path.basename(simg)}: {e}. Skipping. ***')
+        return simg, False, f'{type(e).__name__}: {e}'
+
+
+def _run_catalog(cat, path_output3, path_cat, path_plot, start, threads):
+    try:
+        pipe.set_thread_limits(threads)
+        pipe.catalogmaker(cat, path_output=path_output3, path_cat=path_cat,
+                          figure=False, start=start, path_plot=path_plot)
+        return cat, True, ''
+    except Exception as e:
+        print(f'*** catalogmaker failed for {os.path.basename(cat)}: {e}. Skipping. ***')
+        return cat, False, f'{type(e).__name__}: {e}'
+
+
+def _run_subtraction(simg, path_tmpl, path_output3, path_output4, path_cfg, known_obj_path, threads):
+    """Difference one stack.
+
+    A missing reference template is reported separately from a genuine error:
+    it is a fact about the data, not a fault in the run, and half of a typical
+    ToO night lands on fields KS4 never covered.
+    """
+    try:
+        pipe.set_thread_limits(threads)
+        pipe.subtraction(simg, path_ref=path_tmpl, path_cat=path_output3,
+                         path_refcat=path_tmpl, path_output=path_output4,
+                         path_config=path_cfg, detect=1.5, known_obj=known_obj_path,
+                         threads=threads)
+        return simg, 'ok', ''
+    except FileNotFoundError as e:
+        print(f'*** subtraction skipped for {os.path.basename(simg)}: {e} ***')
+        return simg, 'skip', str(e)
+    except Exception as e:
+        print(f'*** subtraction failed for {os.path.basename(simg)}: {e}. Skipping. ***')
+        return simg, 'fail', f'{type(e).__name__}: {e}'
 
 
 def _preflight():
@@ -210,47 +362,39 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits', known_obj=None, ncores=Non
     os.chmod(path_output5, 0o777)
 
     # log file setting
-    log         = Table([['xxxxxxxxpro'], [9999], [0.0]], names=['process', 'frames', 'time'])
-    LOGname     = f"{path_log}ToOprocess_{date}_{datetime.fromtimestamp(start).strftime('%Y-%m-%d_%H:%M:%S')}.log"
+    _ts         = datetime.fromtimestamp(start).strftime('%Y-%m-%d_%H:%M:%S')
+    LOGname     = f"{path_log}ToOprocess_{date}_{_ts}.log"
+    ISSUEname   = f"{path_log}ToOissues_{date}_{_ts}.log"
+    runlog      = RunLog(LOGname, ISSUEname, start)
+    # Every stage fills these before its runlog.record(); they are reset here so
+    # a stage that reports nothing cannot inherit the previous stage's list.
+    _failed, _skipped = [], []
     
     # pipelines
     if ampcompro:
+        _failed, _skipped = [], []
 
         pipe.ampcom(path_output1, path_cfg)
-        log1            = copy.deepcopy(log)
-        log1['process'] = 'ampcompro'
-        log1['frames']  = len(glob.glob(f'{path_output1}/kmt*.*.*.fits')) # raw images
-        log1['time']    = round(time.time()-start, 2)
-        
-        try:
-            LOG     = vstack([LOG, log1])
-        except NameError:
-            LOG     = log1
-        LOG.write(LOGname, format='ascii', overwrite=True)
+        runlog.record('ampcompro', len(glob.glob(f'{path_output1}kmt*.fits')),
+                      failures=_failed, skips=_skipped)
     
     endampcom = time.time()
     time.sleep(0.1)
     print(f'Amp to chip combine process done.\t {endampcom-start:.2f}sec')
 
     if astrompro:
+        _failed, _skipped = [], []
 
         pipe.astrom(path_output1, path_cfg, path_cat, radius=0.73, ithresh=10, gridcat=field_info)
-        log2            = copy.deepcopy(log)
-        log2['process'] = 'astrompro'
-        log2['frames']  = len(Table.read(f'{path_output1}ToOastrom.txt', format ='ascii'))
-        log2['time']    = round(time.time()-start, 2)
-        
-        try:
-            LOG     = vstack([LOG, log2])
-        except NameError:
-            LOG     = log2
-        LOG.write(LOGname, format='ascii', overwrite=True)
+        runlog.record('astrompro', len(Table.read(f'{path_output1}ToOastrom.txt', format ='ascii')),
+                      failures=_failed, skips=_skipped)
 
     endastrom = time.time()
     time.sleep(0.1)
     print(f'Astrometry process done.\t {endastrom-start:.2f}sec')
 
     if astromqapro:
+        _failed, _skipped = [], []
         
         regex = re.compile(r"(?P<serial>\d{6})\.(?P<chip>kk|mm|tt|nn)\.fits")
         all_files   = sorted(glob.glob(f'{path_output1}*.fits'))
@@ -267,59 +411,49 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits', known_obj=None, ncores=Non
         _qa = partial(_run_qatest, path_cfg=path_cfg, path_cat=path_cat,
                       field_info=field_info, threads=nthread)
         if nproc == 1:
-            for img in imgs:
-                _qa(img)
+            results = [_qa(img) for img in imgs]
         else:
             with multiprocessing.Pool(processes=nproc) as pool:
-                pool.map(_qa, imgs)
+                results = pool.map(_qa, imgs)
+        _failed = [(im, why) for im, ok, why in results if not ok]
         if imgs:
             os.system(f'chmod 777 {path_output1}*mask.fits')
         
-        log3            = copy.deepcopy(log)
-        log3['process'] = 'astromqapro'
-        log3['frames']  = len(imgs)
-        log3['time']    = round(time.time()-start, 2)
-        
-        try:
-            LOG     = vstack([LOG, log3])
-        except NameError:
-            LOG     = log3
-        LOG.write(LOGname, format='ascii', overwrite=True)
+        runlog.record('astromqapro', len(imgs),
+                      failures=_failed, skips=_skipped)
 
     endastrom2 = time.time()
     time.sleep(0.1)
     print(f'1st Astrometry QA process done.\t {endastrom2-start:.2f}sec')
 
     if zpscalepro:
+        _failed, _skipped = [], []
 
         regex = re.compile(r"(?P<serial>\d{6})\.(?P<chip>kk|mm|tt|nn)\.fits")
         all_files   = sorted(glob.glob(f'{path_output1}*.fits')) # ToOampcom.cat should be located
         imgs   = [file for file in all_files if regex.match(os.path.basename(file))]
         
-        for img in imgs:
-            try:
-                outname = pipe.zpscale(img, path_output2, path_cfg, path_cat, path_plot, zpscaled=30.0, figure=False, start=start, gridcat=field_info)
-            except Exception as e:
-                print(f'*** zpscale failed for {os.path.basename(img)}: {e}. Skipping this chip. ***')
-                continue
-            if outname != None and os.path.exists(img.replace('.fits', '.mask.fits')):
-                os.rename(img.replace('.fits', '.mask.fits'), os.path.join(path_output2, outname.replace('.scaled.', '.mask.')))
-        log4            = copy.deepcopy(log)
-        log4['process'] = 'zpscalepro'
-        log4['frames']  = len(imgs)
-        log4['time']    = round(time.time()-start, 2)
-        
-        try:
-            LOG     = vstack([LOG, log4])
-        except NameError:
-            LOG     = log4
-        LOG.write(LOGname, format='ascii', overwrite=True)
+        nproc, nthread = pipe.split_budget(len(imgs), ncores,
+                                           max_procs=STAGE_MAX_PROCS.get('zpscalepro'))
+        print(f'#\tzpscale: {len(imgs)} chip(s), {nproc} process(es) x {nthread} thread(s)')
+        _zp = partial(_run_zpscale, path_output2=path_output2, path_cfg=path_cfg,
+                      path_cat=path_cat, path_plot=path_plot, field_info=field_info,
+                      start=start, threads=nthread)
+        if nproc == 1:
+            results = [_zp(img) for img in imgs]
+        else:
+            with multiprocessing.Pool(processes=nproc) as pool:
+                results = pool.map(_zp, imgs)
+        _failed = [(im, why) for im, ok, why in results if not ok]
+        runlog.record('zpscalepro', len(imgs),
+                      failures=_failed, skips=_skipped)
 
     endzpscale     = time.time()
     time.sleep(0.1)
     print(f'Photometric ZP scaling process done.\t {endzpscale-start:.2f}sec')
 
     if bpmaskpro:
+        _failed, _skipped = [], []
 
         regex = re.compile(r"(?P<field>.*?_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<band>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<serial>\d{6})\.(?P<chip>\w+)\.(?P<type>scaled)\.fits")
         all_files = sorted(glob.glob(f'{path_output2}*.fits'))
@@ -331,123 +465,115 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits', known_obj=None, ncores=Non
             except Exception as e:
                 print(f'*** BPM update failed for {os.path.basename(img)}: {e}. Skipping this chip. ***')
         
-        logm            = copy.deepcopy(log)
-        logm['process'] = 'bpmaskpro'
-        logm['frames']  = len(imgs)
-        logm['time']    = round(time.time()-start, 2)
-        
-        try:
-            LOG     = vstack([LOG, logm])
-        except NameError:
-            LOG     = logm
-        LOG.write(LOGname, format='ascii', overwrite=True)
+        runlog.record('bpmaskpro', len(imgs),
+                      failures=_failed, skips=_skipped)
 
     endbpmask    = time.time()
     time.sleep(0.1)
     print(f'Badpixel masking process done.\t {endbpmask-start:.2f}sec')       
 
     if stackingpro:
+        _failed, _skipped = [], []
 
         pattern = r"(?P<field>.*?_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<band>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<serial>\d{6})\.(?P<chip>\w+)\.(?P<type>scaled|mask)\.fits"
-        total   = pipe.stacking(pattern, path_output2, path_output3, path_cfg, path_tmpl, combinetype='MEDIAN', start=start, gridcat=field_info)
-        log5            = copy.deepcopy(log)
-        log5['process'] = 'stackingpro'
-        log5['frames']  = total
-        log5['time']    = round(time.time()-start, 2)
-        
-        try:
-            LOG     = vstack([LOG, log5])
-        except NameError:
-            LOG     = log5
-        LOG.write(LOGname, format='ascii', overwrite=True)
+        # stacking() walks (observatory, field, band) internally, so the budget
+        # goes to SWarp's own threads here rather than to worker processes.
+        # MEM_MAX stayed at the shipped 256 MB, which on a 22000x22000 coadd
+        # forces SWarp into its VMEM swap files and leaves the threads waiting
+        # on disk; giving it a real share of RAM is the point of the budget.
+        _sw_threads = max(1, ncores)
+        _memmax     = 4096
+        print(f'#\tstacking: SWarp with {_sw_threads} thread(s), MEM_MAX {_memmax} MB')
+        total   = pipe.stacking(pattern, path_output2, path_output3, path_cfg, path_tmpl,
+                                combinetype='MEDIAN', start=start, gridcat=field_info,
+                                threads=_sw_threads, memmax=_memmax)
+        runlog.record('stackingpro', total,
+                      failures=_failed, skips=_skipped)
 
     endstack    = time.time()
     time.sleep(0.1)
     print(f'Image stacking process done.\t {endstack-start:.2f}sec')       
 
     if qa4stackpro:
+        _failed, _skipped = [], []
         
         regex = re.compile(r"(?P<field>.*?_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<filter>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<exptime>\d+sec)\.(?P<type>stack|mstack)\.fits")
         all_files   = sorted(glob.glob(f'{path_output3}*.fits'))
         stackimgs = [file for file in all_files if regex.match(os.path.basename(file)) and regex.match(os.path.basename(file)).group('type') == 'stack']
-        for simg in stackimgs:
-            # if 'ALNRMS' not in fits.open(simg)[0].header:
-            try:
-                pipe.qatest(simg, configdir=path_cfg, refcatdir=path_cat, refcatname='gaiaxp', gridcat=field_info, crreject=False, bleedreject=False, weightmap=True, imtype='stack')
-            except Exception as e:
-                print(f'*** stack QA failed for {os.path.basename(simg)}: {e}. Skipping. ***')
-                # os.system('rm default*')
-                # os.system('rm kmtn*')
+        nproc, nthread = pipe.split_budget(len(stackimgs), ncores,
+                                           max_procs=STAGE_MAX_PROCS.get('qa4stackpro'))
+        print(f'#\tqa4stack: {len(stackimgs)} stack(s), {nproc} process(es) x {nthread} thread(s)')
+        _sq = partial(_run_stackqa, path_cfg=path_cfg, path_cat=path_cat,
+                      field_info=field_info, threads=nthread)
+        if nproc == 1:
+            results = [_sq(si) for si in stackimgs]
+        else:
+            with multiprocessing.Pool(processes=nproc) as pool:
+                results = pool.map(_sq, stackimgs)
+        _failed = [(im, why) for im, ok, why in results if not ok]
 
-        log6            = copy.deepcopy(log)
-        log6['process'] = 'qa4stackpro'
-        log6['frames']  = len(stackimgs)
-        log6['time']    = round(time.time()-start, 2)
-        
-        try:
-            LOG     = vstack([LOG, log6])
-        except NameError:
-            LOG     = log6
-        LOG.write(LOGname, format='ascii', overwrite=True)
+        runlog.record('qa4stackpro', len(stackimgs),
+                      failures=_failed, skips=_skipped)
             
     endqa = time.time()
     time.sleep(0.1)
     print(f'2nd Astrometry QA process done.\t {endqa-start:.2f}sec')
 
     if catalogpro:
+        _failed, _skipped = [], []
 
         regex = re.compile(r"(?P<field>.*?_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<filter>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<exptime>\d+sec)\.(?P<type>stack)\.fits\.cat")
         all_cats= sorted(glob.glob(f'{path_output3}*.cat'))
         cats    = [file for file in all_cats if regex.match(os.path.basename(file))]
-        for cat in cats:
-            try:
-                pipe.catalogmaker(cat, path_output=path_output3, path_cat=path_cat, figure=False, start=start, path_plot=path_plot)
-            except Exception as e:
-                print(f'*** catalogmaker failed for {os.path.basename(cat)}: {e}. Skipping. ***')
+        nproc, nthread = pipe.split_budget(len(cats), ncores,
+                                           max_procs=STAGE_MAX_PROCS.get('catalogpro'))
+        print(f'#\tcatalog: {len(cats)} catalogue(s), {nproc} process(es) x {nthread} thread(s)')
+        _cm = partial(_run_catalog, path_output3=path_output3, path_cat=path_cat,
+                      path_plot=path_plot, start=start, threads=nthread)
+        if nproc == 1:
+            results = [_cm(c) for c in cats]
+        else:
+            with multiprocessing.Pool(processes=nproc) as pool:
+                results = pool.map(_cm, cats)
+        _failed = [(c, why) for c, ok, why in results if not ok]
 
-        log7            = copy.deepcopy(log)
-        log7['process'] = 'catalogpro'
-        log7['frames']  = len(cats)
-        log7['time']    = round(time.time()-start, 2)
-        
-        try:
-            LOG     = vstack([LOG, log7])
-        except NameError:
-            LOG     = log7
-        LOG.write(LOGname, format='ascii', overwrite=True)
+        runlog.record('catalogpro', len(cats),
+                      failures=_failed, skips=_skipped)
             
     endcatalog = time.time()
     time.sleep(0.1)
     print(f"Catalog making process done.\t {endcatalog-start:.2f}sec")
 
     if subtpro:
+        _failed, _skipped = [], []
 
         # subtraction with hotpants
         regex = re.compile(r"(?P<field>.*?_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<filter>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<exptime>\d+sec)\.stack\.fits")
         all_files   = sorted(glob.glob(f'{path_output3}*.fits'))
         stackimgs   = [file for file in all_files if regex.match(os.path.basename(file))]
-        for simg in stackimgs:
-            try:
-                pipe.subtraction(simg, path_ref=path_tmpl, path_cat=path_output3, path_refcat=path_tmpl, path_output=path_output4, path_config=path_cfg, detect=1.5, known_obj=known_obj_path)
-            except Exception as e:
-                print(f'*** subtraction failed for {os.path.basename(simg)}: {e}. Skipping. ***')
+        nproc, nthread = pipe.split_budget(len(stackimgs), ncores,
+                                           max_procs=STAGE_MAX_PROCS.get('subtpro'))
+        print(f'#\tsubtraction: {len(stackimgs)} stack(s), {nproc} process(es) x {nthread} thread(s)')
+        _sb = partial(_run_subtraction, path_tmpl=path_tmpl, path_output3=path_output3,
+                      path_output4=path_output4, path_cfg=path_cfg,
+                      known_obj_path=known_obj_path, threads=nthread)
+        if nproc == 1:
+            results = [_sb(si) for si in stackimgs]
+        else:
+            with multiprocessing.Pool(processes=nproc) as pool:
+                results = pool.map(_sb, stackimgs)
+        _failed  = [(im, why) for im, st, why in results if st == 'fail']
+        _skipped = [(im, why) for im, st, why in results if st == 'skip']
         
-        log8            = copy.deepcopy(log)
-        log8['process'] = 'subtpro'
-        log8['frames']  = len(sorted(glob.glob(f"{path_output4}*.new.*")))
-        log8['time']    = round(time.time()-start, 2)
-        
-        try:
-            LOG     = vstack([LOG, log8])
-        except NameError:
-            LOG     = log8
-        LOG.write(LOGname, format='ascii', overwrite=True)
+        runlog.record('subtpro', len(stackimgs),
+                      failures=_failed, skips=_skipped)
         
     endsubt     = time.time()
     time.sleep(0.1)
     print(f'Image subtraction process done.\t {endsubt-start:.2f}sec')
     
     if rbclasspro:
+        _failed, _skipped = [], []
         
         # This stage now both scores the candidates and writes the surviving
         # snapshots. inference_cutout.py cuts each candidate's 51x51 window out
@@ -478,28 +604,25 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits', known_obj=None, ncores=Non
         else:
             print(f"No transient catalogue found in {path_output4}. Skipping rbclasspro subprocess.")
 
-        log9            = copy.deepcopy(log)
-        log9['process'] = 'rbclasspro'
         # Number of candidates actually scored -- the stage's real workload.
         # Counting snapshot files would now under-report it by ~180x, since only
         # the survivors get written.
         _rbscore = os.path.join(path_output5, 'rbscore.csv')
         try:
             with open(_rbscore) as _f:
-                log9['frames'] = max(sum(1 for _ in _f) - 1, 0)
+                _n_scored = max(sum(1 for _ in _f) - 1, 0)
         except OSError:
-            log9['frames'] = 0
-        log9['time']    = round(time.time()-start, 2)
-        
-        try:
-            LOG     = vstack([LOG, log9])
-        except NameError:
-            LOG     = log9
-        LOG.write(LOGname, format='ascii', overwrite=True)
+            _n_scored = 0
+        runlog.record('rbclasspro', _n_scored,
+                      failures=_failed, skips=_skipped,
+                      note='candidates scored')
 
     endrb   = time.time()
     time.sleep(0.1)
     print(f'Real/Bogus classification process done.\t {endrb-start:.2f}sec')
+
+    runlog.write()
+    print(runlog.summary())
 
     # end of process (LOG saving)
     try:
