@@ -730,3 +730,111 @@ def combine_subtracted_images(
 
     print(f"Combined subtracted image saved to {output_path}")
     print(f"Combined template image saved to {template_output_path}")
+
+#------------------------------------------------------------
+#    Parallel execution budget
+#------------------------------------------------------------
+# The pipeline runs one core budget across the whole reduction. Every stage
+# splits that budget between the number of worker PROCESSES it starts and the
+# number of THREADS each external tool is allowed, so the two can never
+# multiply out past the budget.
+#
+# Without this the defaults compound badly: kmtnet.scamp ships NTHREADS 0
+# ("use every core"), kmtnet.swarp NTHREADS 8, kmtnet.psfex NTHREADS 4, and
+# astroscrappy has no limit at all -- so eight worker processes would each try
+# to take the whole machine.
+
+def split_budget(n_items, ncores, max_procs=None, max_threads=None):
+    """Split a core budget into (processes, threads-per-process).
+
+    The optimum is at neither extreme. Measured on this machine (48 cores,
+    251 GB) running astrometry QA over 16 real chips with a budget of 16:
+
+        1 proc x 16 threads   1302 s     (serial)
+        4 proc x  4 threads    514 s     2.5x
+        8 proc x  2 threads    268 s     4.9x   <- best
+       16 proc x  1 thread     395 s     3.3x
+
+    Thread scaling alone is poor: astroscrappy.detect_cosmics on one 9216x9232
+    chip goes 95.1 s (1 thread) -> 25.4 s (8) -> 19.1 s (48), so 48x the cores
+    buys 5x. But past about eight concurrent chips the 340 MB reads and mask
+    writes saturate memory bandwidth and the extra processes cost more than
+    they return. Hence `max_procs`: stages that move whole chip images should
+    cap it, stages that are compute-bound need not.
+
+    When there is less work than budget -- a single stack to co-add, say -- the
+    leftover goes to the tool's own threads so nothing sits idle.
+
+    Parameters
+    ----------
+    n_items : int
+        Independent units of work in this stage (frames, chips or stacks).
+    ncores : int
+        Total cores this stage may use.
+    max_procs : int, optional
+        Cap on worker processes, for stages limited by memory bandwidth or RAM.
+    max_threads : int, optional
+        Cap on threads per process, for tools that stop scaling early.
+
+    Returns
+    -------
+    (nproc, threads) : both >= 1, with nproc * threads <= ncores
+    """
+    ncores = max(1, int(ncores))
+    n_items = max(1, int(n_items))
+    nproc = min(ncores, n_items)
+    if max_procs is not None:
+        nproc = max(1, min(nproc, int(max_procs)))
+    threads = max(1, ncores // nproc)
+    if max_threads is not None:
+        threads = max(1, min(threads, int(max_threads)))
+    return nproc, threads
+
+
+def thread_env(threads, base=None):
+    """Environment that pins every threading layer a worker might touch.
+
+    astroscrappy is OpenMP; numpy may pull in MKL, OpenBLAS or NumExpr
+    depending on the build. Any one of them left unpinned re-opens the
+    oversubscription hole, so all of them are set together.
+    """
+    import os as _os
+    env = dict(_os.environ if base is None else base)
+    for var in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS',
+                'NUMEXPR_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS'):
+        env[var] = str(max(1, int(threads)))
+    return env
+
+
+def set_thread_limits(threads):
+    """Pin the threading layers of the CURRENT process.
+
+    Call this at the top of a worker. OpenMP reads OMP_NUM_THREADS when its
+    runtime initialises, so a worker started by fork() before the variable was
+    set would otherwise keep the parent's limit.
+    """
+    import os as _os
+    for var, val in thread_env(threads, base={}).items():
+        _os.environ[var] = val
+    try:                                    # honoured even after OpenMP is up
+        import threadpoolctl
+        threadpoolctl.threadpool_limits(max(1, int(threads)))
+    except ImportError:
+        pass
+
+
+def _append_line(path, line):
+    """Append one short line, safely from several processes at once.
+
+    badastrom.txt is written by every qatest() call and those now run in
+    parallel. A buffered Python write can interleave; an O_APPEND write of a
+    line shorter than a pipe buffer is atomic on Linux, so the log stays
+    readable no matter how many workers hit it together.
+    """
+    import os as _os
+    data = line.encode()
+    fd = _os.open(path, _os.O_WRONLY | _os.O_CREAT | _os.O_APPEND, 0o666)
+    try:
+        _os.write(fd, data)
+    finally:
+        _os.close(fd)

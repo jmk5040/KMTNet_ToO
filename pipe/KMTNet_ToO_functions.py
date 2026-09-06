@@ -17,6 +17,7 @@ from KMTNet_util_functions import (
     matching, star4zp, zpcal, add_colorbar, date2MJD, 
     MJD2date, create_ldac_fits, hotpants, invert_image, 
     mask2weight, generate_snapshot, rename_convention, 
+    split_budget, thread_env, set_thread_limits, _append_line,
     safe_load_fits, find_longest_exposure_image, read_header,
     parse_region_bounds, mosaic_image, combine_subtracted_images,
     calculate_crosstalk_positions, build_sex_command
@@ -701,7 +702,8 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
     return 0
 #%% ToOAstrometryQA.py
 def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, crreject=True, bleedreject=True, weightmap=True, imtype='chip',
-           qa_edge_ring=1, qa_max_edge_bad=2, qa_min_good_frac=0.6, qa_max_rms=0.5, qa_min_match=100):
+           qa_edge_ring=1, qa_max_edge_bad=2, qa_min_good_frac=0.6, qa_max_rms=0.5, qa_min_match=100,
+           threads=1):
     """
     Quality Assurance (QA) test for astrometric calibration of KMTNet images.
     
@@ -846,6 +848,7 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
     __version__ = '1.4.0' 
 
     # ====== IMPORTS ========================================================
+    set_thread_limits(threads)
     import os
     import warnings
     import numpy as np
@@ -912,12 +915,7 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
                 'pointerr' : 'out of coverage!'
             }
             badastromtxt    = os.path.join(configdir, 'badastrom.txt')
-            if os.path.exists(badastromtxt):
-                with open(badastromtxt, 'a') as f :
-                    f.write(f'{err} {fname} \n')
-            else:
-                with open(badastromtxt, 'w') as f :
-                    f.write(f'{err} {fname} \n')
+            _append_line(badastromtxt, f'{err} {fname} \n')
 
             print(f'*** {fname} {msg[err]} ***')
 
@@ -1249,7 +1247,9 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
         else:
             prompt_wgt = ''
 
-        prompt  = f'source-extractor {fname} {prompt_cfg} {prompt_cat} {prompt_opt} {prompt_flg} {prompt_chk} {prompt_wgt}'
+        # Explicit, so the worker cannot inherit kmtnet.sex's default and
+        # multiply the core budget by the number of workers.
+        prompt  = f'source-extractor {fname} {prompt_cfg} {prompt_cat} {prompt_opt} {prompt_flg} {prompt_chk} {prompt_wgt} -NTHREADS {threads}'
         os.system(prompt)
         if weightphot and os.path.exists(weightname):
             os.remove(weightname)
@@ -1461,12 +1461,7 @@ def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, 
         if fastrom == 'bad' :
             
             badastromtxt    = os.path.join(configdir, 'badastrom.txt')
-            if os.path.exists(badastromtxt):
-                with open(badastromtxt, 'a') as f :
-                    f.write(f'badastrom {fname} \n')
-            else:
-                with open(badastromtxt, 'w') as f :
-                    f.write(f'badastrom {fname} \n')
+            _append_line(badastromtxt, f'badastrom {fname} \n')
 
         return [gbmap_row, 
                 bad_sect, 

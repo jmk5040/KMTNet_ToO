@@ -1,5 +1,7 @@
 #%% path defines
 import time, os, sys, glob, re, copy, shutil, subprocess
+import multiprocessing
+from functools import partial
 
 # Import path configuration from centralized config file
 # This approach provides several benefits:
@@ -25,12 +27,49 @@ path_tmpl = paths['path_tmpl']
 path_plot   = paths['path_plot']
 path_log    = paths['path_log']
 
+# Core budget for the whole reduction.
+# Every stage divides this between worker processes and the thread count it
+# hands to its external tools, so the two can never multiply past it. Raise it
+# with --ncores, ToO_pipeline(ncores=...), or NCORES in config/local_settings.py.
+# The machine has more cores than this on purpose: it is shared.
+NCORES = 16
+
+# Per-stage cap on concurrent worker processes. Stages that stream whole chip
+# or stack images through memory stop scaling well before the core budget is
+# spent -- see the measurements in split_budget(). Anything not listed here is
+# limited only by NCORES and the number of work items.
+STAGE_MAX_PROCS = {
+    'astromqa': 8,      # 16 chips, budget 16: 8x2 = 268 s vs 16x1 = 395 s
+}
+
+try:
+    from config.working_directory_structure import _local as _local_settings
+    if _local_settings is not None:
+        NCORES = int(getattr(_local_settings, 'NCORES', NCORES))
+except Exception:
+    pass
+
 #%% KMTNet ToO Pipeline
 from astropy.io import fits
 from datetime import datetime
 from astropy.table import Table, vstack
 import KMTNet_ToO_functions as pipe
 import logging
+
+def _run_qatest(img, path_cfg, path_cat, field_info, threads):
+    """One chip's astrometry QA. Module level so multiprocessing can pickle it.
+
+    Failures are caught here rather than in the parent: one bad chip should not
+    take down the pool, and the surviving chips still stack.
+    """
+    try:
+        pipe.qatest(img, configdir=path_cfg, refcatdir=path_cat, refcatname='gaiaxp',
+                    gridcat=field_info, crreject=True, bleedreject=True,
+                    weightmap=True, imtype='chip', threads=threads)
+    except Exception as e:
+        print(f'*** astromqa failed for {os.path.basename(img)}: {e}. Skipping this chip. ***')
+    return img
+
 
 def _preflight():
     """Fail loudly if a file the pipeline depends on is missing.
@@ -83,7 +122,7 @@ def _preflight():
     print('Pre-flight checks passed.')
 
 
-def ToO_pipeline(date, field_info='kmtnet_grid.fits', known_obj=None, **steps):
+def ToO_pipeline(date, field_info='kmtnet_grid.fits', known_obj=None, ncores=None, **steps):
     
     # process managements
     # Every stage defaults to ON, but individual stages can be toggled by the user via the `steps` argument. 
@@ -101,9 +140,11 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits', known_obj=None, **steps):
     )
 
     # start of the process
+    ncores = NCORES if ncores is None else max(1, int(ncores))
     start = time.time()
     print(f'KMTNet ToO Pipeline Starts for {date}.')
     print(f'Field/Tiling coordinate information referring to {field_info}.')
+    print(f'Core budget: {ncores}')
 
     _preflight()
 
@@ -214,12 +255,24 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits', known_obj=None, **steps):
         regex = re.compile(r"(?P<serial>\d{6})\.(?P<chip>kk|mm|tt|nn)\.fits")
         all_files   = sorted(glob.glob(f'{path_output1}*.fits'))
         imgs   = [file for file in all_files if regex.match(os.path.basename(file))]
-        for img in imgs:
-            # if 'QARESULT' not in fits.open(img)[0].header:
-            try:
-                pipe.qatest(img, configdir=path_cfg, refcatdir=path_cat, refcatname='gaiaxp', gridcat=field_info, crreject=True, bleedreject=True, weightmap=True, imtype='chip')
-            except Exception as e:
-                print(f'*** astromqa failed for {os.path.basename(img)}: {e}. Skipping this chip. ***')
+        # Chips are independent, so this fans out over them. astroscrappy's
+        # thread scaling falls off hard (95.1 s -> 25.4 s going from 1 to 8
+        # threads on a real chip), which is why the budget goes to processes
+        # first; qatest() pins its own threading layers from the `threads` it
+        # is given. The chmod moved out of the loop -- it used to fire one
+        # shell per image, each globbing every mask in the directory.
+        nproc, nthread = pipe.split_budget(len(imgs), ncores,
+                                           max_procs=STAGE_MAX_PROCS.get('astromqa'))
+        print(f'#\tastromqa: {len(imgs)} chip(s), {nproc} process(es) x {nthread} thread(s)')
+        _qa = partial(_run_qatest, path_cfg=path_cfg, path_cat=path_cat,
+                      field_info=field_info, threads=nthread)
+        if nproc == 1:
+            for img in imgs:
+                _qa(img)
+        else:
+            with multiprocessing.Pool(processes=nproc) as pool:
+                pool.map(_qa, imgs)
+        if imgs:
             os.system(f'chmod 777 {path_output1}*mask.fits')
         
         log3            = copy.deepcopy(log)
@@ -643,6 +696,11 @@ if __name__ == "__main__":
                              "'radius' in arcsec), given relative to the catalog/ directory. Any "
                              "transient candidate matching a target (default radius 2\") always gets "
                              "a snapshot regardless of its flags, tagged with the target name in the header.")
+    parser.add_argument('--ncores', type=int, default=None, metavar='N',
+                        help=f"Total cores the reduction may use (default {NCORES}). Each stage "
+                             "splits this between worker processes and the thread count handed to "
+                             "SExtractor/SCAMP/SWarp/PSFEx/astroscrappy, so they never multiply out "
+                             "past it.")
     args = parser.parse_args()
 
     watch_directory     = path_raw
@@ -686,6 +744,6 @@ if __name__ == "__main__":
     
     else:
         if os.path.isdir(os.path.join(watch_directory, user_input)):
-            ToO_pipeline(user_input, known_obj=args.known_obj)
+            ToO_pipeline(user_input, known_obj=args.known_obj, ncores=args.ncores)
         else:
             print(f'Check if {os.path.join(watch_directory, user_input)} exists.')
