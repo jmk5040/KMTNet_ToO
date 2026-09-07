@@ -28,7 +28,7 @@ ELLIPTICITY              # 1 - B_IMAGE/A_IMAGE
 FLUX_RADIUS              # Fraction-of-light radii                                   [pixel]
 FWHM_IMAGE               # FWHM assuming a gaussian core                             [pixel]
 CLASS_STAR               # S/G classifier output                                    
-VIGNET(50,50)            # Pixel data around detection                               [count]
+#VIGNET(50,50)            # Pixel data around detection                               [count]
 #VIGNET_SHIFT            # Pixel data around detection, corrected for shift          [count]
 BACKGROUND               # Background at centroid position                           [count]
 FLAGS                    # Extraction flags                                         

@@ -257,14 +257,14 @@ def ampcom(path_data, path_cfg, frames=None, write_header=True, cleanup=True, th
     
             chip = chiparr[k]
             catname     = f'{path_data}{serial}.{chip}.ampcom.cat'
-            # kmtnet.param carries VIGNET(50,50) for the PSFEx branch of
-            # subtraction(). Here it is pure waste: this catalogue is only read
-            # for MAG_AUTO, MAGERR_AUTO, FLAGS, FWHM_IMAGE, ELONGATION and
-            # THETA_IMAGE, and is deleted at the end of ampcom -- but VIGNET
-            # writes a 50x50 ASCII pixel stamp per detection, 2500 of the 2534
-            # fields per row. Per chip that was a 533 MB catalogue taking 37 s
-            # to produce and 74 s to parse, versus 5.9 MB / 11 s / 0.9 s here.
-            param       = os.path.join(path_cfg, 'kmtnet_novignet.param')
+            # kmtnet.param no longer carries VIGNET(50,50); kmtnet_vignet.param
+            # does, for PSFEx. VIGNET writes a 50x50 ASCII pixel stamp per
+            # detection -- 2500 of 2534 fields per row -- and this catalogue is
+            # only read for MAG_AUTO, MAGERR_AUTO, FLAGS, FWHM_IMAGE, ELONGATION
+            # and THETA_IMAGE before being deleted. Per chip that was 533 MB
+            # taking 37 s to write and 74 s to parse, against 5.9 MB / 11 s /
+            # 0.9 s now.
+            param       = os.path.join(path_cfg, 'kmtnet.param')
             cfg         = os.path.join(path_cfg, 'kmtnet.sex')
             conv        = os.path.join(path_cfg, 'kmtnet.conv')
             nnw         = os.path.join(path_cfg, 'kmtnet.nnw')
@@ -349,7 +349,7 @@ def ampcom(path_data, path_cfg, frames=None, write_header=True, cleanup=True, th
 def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet_grid.fits',
            astrom_rms_max=1e-4, neighbour_fallback=True, neighbour_max_age_days=3.0,
            gaiaxp_download=True, frames=None, write_info=True, cleanup=True, collect_only=False, threads=1,
-           sexparam='kmtnet_novignet.param'):
+           sexparam='kmtnet.param'):
     """
     Astrometric calibration of KMTNet chip images using SCAMP.
     
@@ -595,13 +595,11 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
                 hd.flush()  # Write changes to the file
             
             catname     = f'{path_data}{serial}.{chip}.astrom.cat'
-            # kmtnet.param carries VIGNET(50,50) for the PSFEx branch of
-            # subtraction(); SCAMP never reads it. Measured on 8 chips, dropping
-            # it leaves the astrometric solution alone -- worst ASTRRMS
-            # difference 1e-9 mas against solutions of ~34 mas -- while the
-            # per-chip catalogue falls from 527 MB to 8.1 MB. That is 81 GB of
-            # writes per 156-chip night, which matters most once the frames are
-            # solved side by side.
+            # SCAMP never reads VIGNET, so the plain kmtnet.param is used.
+            # Measured on 8 chips against kmtnet_vignet.param, the astrometric
+            # solutions agree to 1e-9 mas on solutions of ~34 mas, while the
+            # per-chip LDAC falls from 527 MB to 8.1 MB -- 81 GB of writes per
+            # 156-chip night, which matters most with frames solved side by side.
             param       = os.path.join(path_cfg, sexparam)
             cfg         = os.path.join(path_cfg, 'kmtnet.sex')
             conv        = os.path.join(path_cfg, 'kmtnet.conv')
@@ -3477,10 +3475,11 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
         # relying on it: build_sex_command() writes its catalogue next to the
         # image it is given (SUBTIMG here), but psfex below reads the SCIIMG
         # catalogue, which nothing in this branch produces; and kmtnet_psf.param
-        # has no VIGNET, which PSFEx requires -- kmtnet.param is the one that
-        # carries it. Real/Bogus classification is the supported path.
+        # has no VIGNET, which PSFEx requires -- kmtnet_vignet.param, used here,
+        # is the one that carries it. Real/Bogus classification is the supported
+        # path.
         os.system(build_sex_command(
-            SUBTIMG, conf_sex, os.path.join(path_config, 'kmtnet.param'), conf_conv, conf_nnw, detect=20, fwhm=fits.getheader(SCIIMG).get("FWHM"), mask=MASKIMG, weight=WEIGHTIMG, extra_args={"-CATALOG_TYPE": "FITS_LDAC", "-NTHREADS": str(threads)}))
+            SUBTIMG, conf_sex, os.path.join(path_config, 'kmtnet_vignet.param'), conf_conv, conf_nnw, detect=20, fwhm=fits.getheader(SCIIMG).get("FWHM"), mask=MASKIMG, weight=WEIGHTIMG, extra_args={"-CATALOG_TYPE": "FITS_LDAC", "-NTHREADS": str(threads)}))
         if os.path.isfile(SCIIMG.replace('.fits', '.cat')):
             os.system(f'psfex {SCIIMG.replace(".fits", ".cat")} -c {path_config}kmtnet.psfex -NTHREADS {threads} -WRITE_XML N')
             os.system(build_sex_command(

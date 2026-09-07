@@ -275,7 +275,7 @@ def _preflight():
         os.path.join(path_cfg, 'kmtnet.psfex'),
         os.path.join(path_cfg, 'kmtnet_psf.param'),
         os.path.join(path_cfg, 'kmtnet_imask.param'),
-        os.path.join(path_cfg, 'kmtnet_novignet.param'),
+        os.path.join(path_cfg, 'kmtnet_vignet.param'),
         os.path.join(path_cfg, 'kmtnet_grid.fits'),
         os.path.join(path_cfg, 'badpixelmap'),
         os.path.join(path_cfg, 'ahead'),
