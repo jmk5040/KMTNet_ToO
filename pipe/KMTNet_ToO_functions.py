@@ -23,6 +23,16 @@ from KMTNet_util_functions import (
     calculate_crosstalk_positions, build_sex_command
 )
 #%% ToOAmplifierCombine.py
+class NoReferenceTemplate(FileNotFoundError):
+    """No usable reference image for this field/band.
+
+    A distinct type because it is a fact about the data, not a fault in the run:
+    KS4 never covered the field, or covered it in another band. Catching plain
+    FileNotFoundError instead would also swallow a missing output directory or a
+    deleted input, and log a real breakage as an expected skip.
+    """
+
+
 def _write_ampcom_header(path):
     """Start ToOampcom.cat fresh with its column header."""
     with open(path, 'w') as f:
@@ -3305,8 +3315,15 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
         print(f"Science image: \n{os.path.basename(sciimg)}")
 
     # reference image
-    pattern_ks4 = os.path.join(path_ref, f'{field}.{radec}', f'ks4*{band}*.stack.fits')
-    pattern_ps1 = os.path.join(path_ref, f'{field}.{radec}', f'ps1*{band}*.stack.fits')
+    # '.scaled.' is required, not decorative: the crmap and bleed maps that go
+    # into the subtraction mask are derived from this name by
+    # refimg.replace('.scaled.', '.crmap.') below. A reference without it -- the
+    # unscaled coadd, ks4.<field>.<band>.<exp>sec.stack.fits, which some field
+    # directories carry -- leaves those replacements a no-op, so the mask is
+    # built from paths that do not exist and the run dies much later with an
+    # unrelated error.
+    pattern_ks4 = os.path.join(path_ref, f'{field}.{radec}', f'ks4*{band}*.scaled.stack.fits')
+    pattern_ps1 = os.path.join(path_ref, f'{field}.{radec}', f'ps1*{band}*.scaled.stack.fits')
     refimg = find_longest_exposure_image(pattern_ks4)
 
     # Pan-STARRS reaches down to declination -30. Both patterns are built up
@@ -3348,7 +3365,7 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
 
     if (sciimg is None) or (refimg is None) or (maskimg is None) or (not os.path.isfile(maskimg)):
         print('The image set of science, referernce and mask images is not ready.')
-        raise FileNotFoundError(
+        raise NoReferenceTemplate(
             f'{field}.{radec} {band}-band: {reason}')
 
     # science image photometric catalog --> HOTPANTs subtraction stamps

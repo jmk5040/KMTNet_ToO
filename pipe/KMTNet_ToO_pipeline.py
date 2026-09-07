@@ -215,7 +215,7 @@ def _run_subtraction(simg, path_tmpl, path_output3, path_output4, path_cfg, know
                          path_config=path_cfg, detect=1.5, known_obj=known_obj_path,
                          threads=threads)
         return simg, 'ok', ''
-    except FileNotFoundError as e:
+    except pipe.NoReferenceTemplate as e:
         print(f'*** subtraction skipped for {os.path.basename(simg)}: {e} ***')
         return simg, 'skip', str(e)
     except Exception as e:

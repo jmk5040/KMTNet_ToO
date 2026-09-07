@@ -589,15 +589,27 @@ def find_longest_exposure_image(pattern):
     Returns:
     - str: The filename of the image with the longest exposure time, or 'None' if no images are found.
     """
-    # Use glob to find files matching the pattern
-    files = [f for f in sorted(glob.glob(pattern)) if "mask" not in f and "crmap" not in f]
+    # A KS4 field directory holds the science stack next to its by-products --
+    # bpm, bleed, cleaned, badamp, crmap, mask -- all matching '*.stack.fits'.
+    # Only "mask" and "crmap" used to be excluded, so a field that has the
+    # by-products but no science stack would hand back a bad-pixel map as its
+    # "reference image", and the run failed much later with something unrelated.
+    _AUX = ('mask', 'crmap', 'bpm', 'bleed', 'cleaned', 'badamp', 'weight')
+    files = [f for f in sorted(glob.glob(pattern))
+             if not any(a in os.path.basename(f) for a in _AUX)]
 
-    # Check whether the files have proper BITPIX
+    # Check whether the files have proper BITPIX. Build a new list rather than
+    # removing from the one being iterated: list.remove() shifts everything down
+    # so the next element is skipped, which is how a BITPIX-8 bad-pixel map used
+    # to survive this check when a BITPIX-8 bleed map preceded it.
+    keep = []
     for f in files:
         hdr = fits.getheader(f)
         if hdr['BITPIX'] != -32:
             print(f"File {os.path.basename(f)} has BITPIX {hdr['BITPIX']}, not -32")
-            files.remove(f)
+            continue
+        keep.append(f)
+    files = keep
     
     # Try to find the file with the longest exposure time
     try:
