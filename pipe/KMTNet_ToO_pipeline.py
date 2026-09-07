@@ -39,7 +39,8 @@ NCORES = 16
 # spent -- see the measurements in split_budget(). Anything not listed here is
 # limited only by NCORES and the number of work items.
 STAGE_MAX_PROCS = {
-    'astromqa': 8,      # 16 chips, budget 16: 8x2 = 268 s vs 16x1 = 395 s
+    'astromqa':    8,   # 16 chips, budget 16: 8x2 = 268 s vs 16x1 = 395 s
+    'stackingpro': 4,   # each SWarp writes a 1.9 GB coadd plus its resample files
 }
 
 try:
@@ -232,6 +233,30 @@ def _run_ampcom(chunk, path_output1, path_cfg, threads):
     except Exception as e:
         print(f'*** ampcom failed for {len(chunk)} frame(s) starting {os.path.basename(chunk[0])}: {e} ***')
         return chunk, False, f'{type(e).__name__}: {e}'
+
+
+def _run_bpmask(img, path_cfg, threads):
+    """Merge the observatory bad-pixel map into one chip's mask."""
+    try:
+        pipe.set_thread_limits(threads)
+        pipe.BPM_update(img, path_cfg)
+        return img, True, ''
+    except Exception as e:
+        print(f'*** BPM update failed for {os.path.basename(img)}: {e}. Skipping this chip. ***')
+        return img, False, f'{type(e).__name__}: {e}'
+
+
+def _run_stacking(cell, pattern, path_output2, path_output3, path_cfg, path_tmpl,
+                  field_info, start, threads, memmax):
+    """Co-add one (observatory, field, band) cell."""
+    try:
+        n = pipe.stacking(pattern, path_output2, path_output3, path_cfg, path_tmpl,
+                          combinetype='MEDIAN', start=start, gridcat=field_info,
+                          threads=threads, memmax=memmax, cells=[cell])
+        return cell, True, '', n
+    except Exception as e:
+        print(f'*** stacking failed for {cell}: {e} ***')
+        return cell, False, f'{type(e).__name__}: {e}', 0
 
 
 def _run_astrom(chunk, path_output1, path_cfg, path_cat, field_info, threads):
@@ -527,11 +552,16 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits', known_obj=None, ncores=Non
         all_files = sorted(glob.glob(f'{path_output2}*.fits'))
         imgs   = [file for file in all_files if regex.match(os.path.basename(file))]
 
-        for img in imgs:
-            try:
-                pipe.BPM_update(img, path_cfg)
-            except Exception as e:
-                print(f'*** BPM update failed for {os.path.basename(img)}: {e}. Skipping this chip. ***')
+        nproc, nthread = pipe.split_budget(len(imgs), ncores,
+                                           max_procs=STAGE_MAX_PROCS.get('bpmaskpro'))
+        print(f'#\tbpmask: {len(imgs)} chip(s), {nproc} process(es) x {nthread} thread(s)')
+        _bp = partial(_run_bpmask, path_cfg=path_cfg, threads=nthread)
+        if nproc == 1:
+            results = [_bp(img) for img in imgs]
+        else:
+            with multiprocessing.Pool(processes=nproc) as pool:
+                results = pool.map(_bp, imgs)
+        _failed = [(im, why) for im, ok, why in results if not ok]
         
         runlog.record('bpmaskpro', len(imgs),
                       failures=_failed, skips=_skipped)
@@ -553,12 +583,34 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits', known_obj=None, ncores=Non
         # the resident memory (0.3 GB -> 4.0 GB peak), and the output was
         # pixel-identical. On a machine shared with other users that trade is
         # not worth taking.
-        _sw_threads = max(1, ncores)
-        _memmax     = 256
-        print(f'#\tstacking: SWarp with {_sw_threads} thread(s), MEM_MAX {_memmax} MB')
-        total   = pipe.stacking(pattern, path_output2, path_output3, path_cfg, path_tmpl,
-                                combinetype='MEDIAN', start=start, gridcat=field_info,
-                                threads=_sw_threads, memmax=_memmax)
+        _memmax = 256
+        _cells  = pipe.stacking(pattern, path_output2, path_output3, path_cfg, path_tmpl,
+                                gridcat=field_info, list_cells=True)
+        _cap    = STAGE_MAX_PROCS.get('stackingpro')
+        # Run in rounds rather than through one fixed pool. A Pool(nproc) would
+        # hold its thread count for the whole stage, so a tail of 2 coadds would
+        # still run 2 x 6 threads and leave half the budget idle. Recomputing the
+        # split per round gives 4x6, 4x6, 2x12 for ten cells on a budget of 24.
+        # The trade is that a round waits for its slowest member; the coadds are
+        # near enough the same size for that to cost little.
+        total = 0
+        _nproc0, _ = pipe.split_budget(len(_cells), ncores, max_procs=_cap)
+        print(f'#\tstacking: {len(_cells)} coadd(s) in rounds of {_nproc0}, MEM_MAX {_memmax} MB')
+        for _i in range(0, len(_cells), max(1, _nproc0)):
+            _batch = _cells[_i:_i + max(1, _nproc0)]
+            _np, _nt = pipe.split_budget(len(_batch), ncores, max_procs=_cap)
+            print(f'#\t  round {_i // max(1, _nproc0) + 1}: {len(_batch)} coadd(s), '
+                  f'{_np} process(es) x {_nt} thread(s)')
+            _st = partial(_run_stacking, pattern=pattern, path_output2=path_output2,
+                          path_output3=path_output3, path_cfg=path_cfg, path_tmpl=path_tmpl,
+                          field_info=field_info, start=start, threads=_nt, memmax=_memmax)
+            if _np == 1:
+                _res = [_st(c) for c in _batch]
+            else:
+                with multiprocessing.Pool(processes=_np) as pool:
+                    _res = pool.map(_st, _batch)
+            _failed += [(str(c), why) for c, ok, why, _ in _res if not ok]
+            total   += sum(n for *_, n in _res)
         runlog.record('stackingpro', total,
                       failures=_failed, skips=_skipped)
 

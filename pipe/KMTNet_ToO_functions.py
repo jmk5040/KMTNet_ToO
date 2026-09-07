@@ -2462,7 +2462,8 @@ def BPM_update(img, path_cfg):
     
     return
 #%% ToOImageStackter.py
-def stacking(filename_convention, path_input, path_output, path_cfg, path_ref, combinetype='MEDIAN', start=None, gridcat='kmtnet_grid.cat', threads=1, memmax=2048):
+def stacking(filename_convention, path_input, path_output, path_cfg, path_ref, combinetype='MEDIAN', start=None, gridcat='kmtnet_grid.cat', threads=1, memmax=2048,
+             cells=None, list_cells=False):
     """
     Image stacking function for KMTNet chip images using SWarp.
     
@@ -2616,6 +2617,14 @@ def stacking(filename_convention, path_input, path_output, path_cfg, path_ref, c
     observs = sorted(list(set([os.path.basename(b).split('.')[4] for b in sfits])))
     total   = 0
 
+    # One coadd per (observatory, field, band). `list_cells` reports them so a
+    # caller can deal them out; `cells` restricts this call to its share.
+    if list_cells:
+        return [(o, f, b) for o in observs for f in fields for b in bands]
+    wanted = None if cells is None else {tuple(c) for c in cells}
+
+    set_thread_limits(threads)
+
     for observ in observs:
 
         for field in fields:
@@ -2627,6 +2636,9 @@ def stacking(filename_convention, path_input, path_output, path_cfg, path_ref, c
             radec   = ks4cat[ks4cat['field_name1']==int(field)]['field_name2'][0]
             
             for band in bands:
+
+                if wanted is not None and (observ, field, band) not in wanted:
+                    continue
 
                 # center coordinate (should be fixed for dual-mode photometry)
                 try:
