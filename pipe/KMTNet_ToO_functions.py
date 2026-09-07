@@ -327,7 +327,7 @@ def ampcom(path_data, path_cfg):
 #%% ToOAstrometry.py
 def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet_grid.fits',
            astrom_rms_max=1e-4, neighbour_fallback=True, neighbour_max_age_days=3.0,
-           gaiaxp_download=True):
+           gaiaxp_download=True, frames=None, write_info=True, cleanup=True, collect_only=False, threads=1):
     """
     Astrometric calibration of KMTNet chip images using SCAMP.
     
@@ -462,7 +462,12 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
         if 'CD1_1' not in seed:        # nothing usable -> do not cache
             return False
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        seed.totextfile(out_path, overwrite=True)
+        # Every frame of a given site+chip caches to the same path, so with
+        # workers running side by side a reader could otherwise pick up a
+        # half-written seed. Write beside it and rename, which is atomic.
+        tmp = f'{out_path}.{os.getpid()}.tmp'
+        seed.totextfile(tmp, overwrite=True)
+        os.replace(tmp, out_path)
         return True
 
     def _ahead_is_fresh(path, max_age_days):
@@ -472,7 +477,14 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
             return True
         return (time.time() - os.path.getmtime(path)) <= max_age_days * 86400.0
 
+    set_thread_limits(threads)
+
+    # `frames` lets a caller hand one worker a slice of the night. Without it
+    # every worker would glob the whole directory and redo all of it.
     fits_files = sorted(Path(path_data).glob('kmt*.fits'))
+    if frames is not None:
+        wanted = {os.path.basename(str(f)) for f in frames}
+        fits_files = [f for f in fits_files if f.name in wanted]
 
     # Initialize a list to hold all the header information
     data_rows = []
@@ -505,7 +517,15 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
 
     # Convert the list of dictionaries into an Astropy Table
     info = Table(rows=data_rows)
-    info.write(os.path.join(path_data, 'ToOastrom.txt'), format='ascii', overwrite=True)
+    # One table for the whole night. Workers hold only their own slice, so they
+    # must not write it -- each would overwrite the others with a partial table.
+    if write_info:
+        info.write(os.path.join(path_data, 'ToOastrom.txt'), format='ascii', overwrite=True)
+
+    # The parent builds the night's table over every frame and stops there; the
+    # frames themselves are then dealt out to workers.
+    if collect_only:
+        return 0
 
     # Define each variable from the columns
     name    = info['name']
@@ -615,8 +635,10 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
 
             while True:
 
-                sexcom   = f'source-extractor {path_data}{serial}.{chip}.fits -c {cfg} -CATALOG_NAME {catname} -PARAMETERS_NAME {param} -FILTER_NAME {conv} -STARNNW_NAME {nnw} -CATALOG_TYPE FITS_LDAC -HEADER_SUFFIX NONE -DETECT_THRESH {thresh} -ANALYSIS_THRESH {thresh} -SATUR_LEVEL 60000.0'
-                scampcom = f'scamp {catname} -c {os.path.join(path_cfg, "kmtnet.scamp")} {refargs} -POSITION_MAXERR 20.0 -CROSSID_RADIUS 5.0 -DISTORT_DEGREES 3 -PROJECTION_TYPE TPV -AHEADER_GLOBAL {current_ahead} -STABILITY_TYPE INSTRUMENT'
+                # -NTHREADS on both: kmtnet.scamp ships NTHREADS 0, meaning "every
+                # core on the machine", which a pool of workers would each claim.
+                sexcom   = f'source-extractor {path_data}{serial}.{chip}.fits -c {cfg} -CATALOG_NAME {catname} -PARAMETERS_NAME {param} -FILTER_NAME {conv} -STARNNW_NAME {nnw} -CATALOG_TYPE FITS_LDAC -HEADER_SUFFIX NONE -DETECT_THRESH {thresh} -ANALYSIS_THRESH {thresh} -SATUR_LEVEL 60000.0 -NTHREADS {threads}'
+                scampcom = f'scamp {catname} -c {os.path.join(path_cfg, "kmtnet.scamp")} {refargs} -POSITION_MAXERR 20.0 -CROSSID_RADIUS 5.0 -DISTORT_DEGREES 3 -PROJECTION_TYPE TPV -AHEADER_GLOBAL {current_ahead} -STABILITY_TYPE INSTRUMENT -NTHREADS {threads}'
 
                 os.system(sexcom)
                 if os.path.exists(outhdr):
@@ -696,9 +718,12 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
 
                 fits.PrimaryHDU(data=fits.getdata(f'{path_data}{serial}.{chip}.fits'), header=hdu).writeto(f'{path_data}{serial}.{chip}.fits', overwrite=True)
 
-    os.system(f'chmod 777 {path_data}*')
-    os.system(f'rm {path_data}??????.??.astrom.cat')
-    
+    # These sweep the entire directory, so a worker running them would delete
+    # catalogues its siblings are still using.
+    if cleanup:
+        os.system(f'chmod 777 {path_data}*')
+        os.system(f'rm -f {path_data}??????.??.astrom.cat')
+
     return 0
 #%% ToOAstrometryQA.py
 def qatest(fname, configdir, gridcat, refcatdir, refcatname='GAIAXP', divnum=8, crreject=True, bleedreject=True, weightmap=True, imtype='chip',
@@ -3418,6 +3443,12 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
     WEIGHTIMG   = mask2weight(MASKIMG)
 
     if psf_analysis==True:
+        # NOTE: off by default and not exercised. Two things to check before
+        # relying on it: build_sex_command() writes its catalogue next to the
+        # image it is given (SUBTIMG here), but psfex below reads the SCIIMG
+        # catalogue, which nothing in this branch produces; and kmtnet_psf.param
+        # has no VIGNET, which PSFEx requires -- kmtnet.param is the one that
+        # carries it. Real/Bogus classification is the supported path.
         os.system(build_sex_command(
             SUBTIMG, conf_sex, os.path.join(path_config, 'kmtnet.param'), conf_conv, conf_nnw, detect=20, fwhm=fits.getheader(SCIIMG).get("FWHM"), mask=MASKIMG, weight=WEIGHTIMG, extra_args={"-CATALOG_TYPE": "FITS_LDAC", "-NTHREADS": str(threads)}))
         if os.path.isfile(SCIIMG.replace('.fits', '.cat')):
