@@ -136,6 +136,12 @@ def parse_args():
     p.add_argument('-c', '--channels', nargs='+', default=['ref', 'new', 'sub'])
     p.add_argument('--cutsize', type=float, default=1.0,
                    help='Cutout size in arcmin, must match subtraction() (default 1.0).')
+    p.add_argument('--all_sources', action='store_true',
+                   help="Score every source in the catalogue, ignoring the flag cuts. For "
+                        "checking what the flags throw away: the columns are kept in the "
+                        "output so a score can be attributed to the flags that were set.")
+    p.add_argument('--no_snapshots', action='store_true',
+                   help='Score only; write no stamps.')
     p.add_argument('--snap_thresh', type=float, default=0.5,
                    help='Write a snapshot for candidates scoring above this (default 0.5). '
                         'known-object matches are always written.')
@@ -188,7 +194,11 @@ def main():
     full = ascii.read(args.transient_cat, format='tab')
     flag_pass = ~_as_bool(full['flag']) if 'flag' in full.colnames else np.ones(len(full), bool)
     known = _as_bool(full['known_match']) if 'known_match' in full.colnames else np.zeros(len(full), bool)
-    sel = flag_pass | known
+    if args.all_sources:
+        sel = np.ones(len(full), bool)
+        print('Scoring EVERY source (flag cuts ignored).')
+    else:
+        sel = flag_pass | known
     tbl = _normalise_types(full[sel])
     print(f'Candidates in catalogue : {len(full)}')
     print(f'Scored (flag-pass | known-object) : {len(tbl)}')
@@ -217,6 +227,9 @@ def main():
     meta = pd.DataFrame()
     stem = os.path.splitext(os.path.basename(str(tbl['hdim'][0])))[0]
     meta['id'] = [f'{stem}.{int(n):06d}' for n in tbl['NUMBER']]
+    # Carry the flags through so a score can be attributed to what excluded it.
+    for _c in [c for c in tbl.colnames if c == 'flag' or c.startswith('flag_')]:
+        meta[_c] = _as_bool(tbl[_c])
     for i, sd in enumerate(state_dicts):
         model.load_state_dict(sd['model_state_dict'])
         meta[f'prob_model_{i}'] = predict(model, loader, device)
@@ -230,6 +243,11 @@ def main():
     meta.to_csv(os.path.join(outdir, 'rbscore.csv'), index=False)
 
     # Snapshots only for what a human would actually open.
+    if args.no_snapshots:
+        print(f"Summary: The number of objects got rbscore>0.5: "
+              f"{int((meta['prob'] > 0.5).sum())}")
+        print(f'Total {time.time() - t_start:.1f}s')
+        return
     survive = (meta['prob'].values > args.snap_thresh) | known[sel]
     n_forced = int(np.count_nonzero(known[sel] & ~(meta['prob'].values > args.snap_thresh)))
     print(f'Writing snapshots for {int(survive.sum())} candidate(s) '

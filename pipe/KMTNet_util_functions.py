@@ -502,15 +502,47 @@ def generate_snapshot(row, cutsize=2.0, pixscale=0.4, outdir=None):
     position = SkyCoord(ra=tra, dec=tdec, frame='icrs', unit='deg')
     size = u.Quantity((cutsize, cutsize), u.arcmin)
 
+    def _truthy(v):
+        """Interpret a flag that may have come back from disk as text.
+
+        A catalogue round-trips through ascii.tab, so a boolean column returns
+        as the strings 'True'/'False' -- and bool('False') is True. Assigning a
+        Python bool into such a column does not help either: astropy casts it to
+        the column's string dtype. Every consumer of these columns has to be
+        explicit about it.
+        """
+        if isinstance(v, (bool, np.bool_)):
+            return bool(v)
+        if isinstance(v, (bytes, str)):
+            return v.strip().lower() in ('true', 't', '1', 'yes')
+        try:
+            return bool(int(v))
+        except (TypeError, ValueError):
+            return bool(v)
+
     # Optional known-object provenance (present only when a target CSV was used).
     try:
-        known_match = bool(row['known_match'])
+        known_match = _truthy(row['known_match'])
     except (KeyError, IndexError, ValueError):
         known_match = False
     try:
         known_target = str(row['known_target']).strip()
     except (KeyError, IndexError, ValueError):
         known_target = ''
+
+    # Dither provenance, absent from catalogues written before it existed.
+    def _get(key, default):
+        try:
+            v = row[key]
+            return v.item() if hasattr(v, 'item') else v
+        except (KeyError, IndexError, ValueError):
+            return default
+    ndither  = int(_get('ndither', -1))
+    edgedist = float(_get('edgedist', -1.0))
+    srcchips = str(_get('srcchips', '')).strip()
+    # The contributing exposures live in the scaled tree; inim is the coadd in
+    # the subtraction directory, so its dirname is the wrong answer.
+    srcdir   = os.path.dirname(str(inim)).replace('/subt/', '/scaled/')
 
     for image, kind in zip([inim, hcim, hdim], ['new', 'ref', 'sub']):
         with fits.open(image) as hdul:
@@ -535,6 +567,17 @@ def generate_snapshot(row, cutsize=2.0, pixscale=0.4, outdir=None):
                 'IMAFLAG': (row['IMAFLAGS_ISO'], "Mask image flags"),
                 'KNOWNOBJ': (known_match, "snapshot forced by known-object (CSV) match"),
                 'TARGET': (known_target, "matched known-object name"),
+                # Which single-chip exposures actually cover this position. The
+                # stack is a MEDIAN, so NDITHER decides whether outlier
+                # rejection could work here at all: at NDITHER=1 the median is
+                # that one exposure and a residual survives untouched. Kept as
+                # context for whoever looks at the stamp, not as a verdict.
+                'NDITHER': (ndither, "single-chip exposures covering this position"),
+                'EDGEDIST': (edgedist, "px to nearest chip edge, best contributor"),
+                # Abbreviated <serial>.<chip>; the full paths would overflow the
+                # card several times over. SRCDIR holds the directory.
+                'SRCCHIPS': (srcchips, "contributing exposures (serial.chip)"),
+                'SRCDIR': (srcdir, "directory holding the contributing exposures"),
             }
             for key, value in metadata.items():
                 hdu.header[key] = value

@@ -3302,6 +3302,7 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
     import re, os, glob, copy
     import astropy.units as u
     from astropy.wcs import WCS
+    from astropy.wcs.utils import skycoord_to_pixel
     from itertools import repeat
     from functools import partial
     from astropy.time import Time
@@ -3556,7 +3557,7 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
     c_cent = w.pixel_to_world(scihdr['NAXIS1']/2, scihdr['NAXIS2']/2)
     c_sub = SkyCoord(subtbl['ALPHA_J2000'], subtbl['DELTA_J2000'], unit=u.deg)
 
-    flagnumbers = np.arange(10)
+    flagnumbers = np.arange(11)     # 0-9 plus flag_10 (no dither coverage)
     #    Generate flag columns
     for num in flagnumbers:
         subtbl[f'flag_{num}'] = False
@@ -3657,9 +3658,79 @@ def subtraction(sciimg, path_ref, path_cat, path_refcat, path_output, path_confi
     snrcut  = 5         # flag6
     subtbl['flag_6'][(subtbl['SNR_WIN']<snrcut)] = True
     #------------------------------------------------------------
+    #    Dither provenance: which single-chip exposures cover each candidate
+    #------------------------------------------------------------
+    # Recorded as information, not as a cut. A stack is a MEDIAN of the dithers
+    # covering a given point, so the number of them decides whether outlier
+    # rejection could work there at all: with one exposure the median is that
+    # exposure, and a cosmic ray or a subtraction residual survives untouched.
+    # Measured over this field, 11.8% of detections sit on one dither and 41.9%
+    # on two, so it is context a human needs when judging a candidate -- but it
+    # does NOT separate artifacts from real sources (the rb>0.9 artifacts and
+    # the rb>0.9 flag-passing candidates have the same distribution), which is
+    # why it is a column rather than a flag.
+    #
+    # NDITHER == 0 is the exception: no exposure covers the position, so the
+    # detection cannot be real. That is flagged.
+    path_single = path_output.replace('subt', 'scaled')
+    subtbl['ndither']  = 0
+    subtbl['edgedist'] = -1.0
+    subtbl['srcchips'] = np.array([''] * len(subtbl), dtype='U64')
+    try:
+        _foot = []
+        for _l in range(16):                       # IMAGE0..IMAGEf
+            _base = scihdr.get(f'IMAGE{hex(_l)[-1]}')
+            if _base is None:
+                continue
+            for _chip in ('kk', 'mm', 'tt', 'nn'):
+                _f = os.path.join(path_single, _base.replace('.scaled.fits', f'.{_chip}.scaled.fits'))
+                if not os.path.isfile(_f):
+                    continue
+                _hh = fits.getheader(_f)
+                # Abbreviated tag: exposure serial + chip. The full paths would
+                # overflow a FITS card several times over.
+                _serial = os.path.basename(_f).split('.')[5]
+                _foot.append((WCS(_hh), _hh['NAXIS1'], _hh['NAXIS2'], f'{_serial}.{_chip}'))
+        if _foot:
+            _pos  = SkyCoord(ra=subtbl['ALPHA_J2000'].data, dec=subtbl['DELTA_J2000'].data, unit='deg')
+            _nd   = np.zeros(len(subtbl), dtype=int)
+            _ed   = np.full(len(subtbl), -1.0)
+            _tags = [[] for _ in range(len(subtbl))]
+            for _w, _nx, _ny, _tag in _foot:
+                _x, _y = skycoord_to_pixel(_pos, _w)
+                _in = (_x >= 0) & (_x < _nx) & (_y >= 0) & (_y < _ny)
+                # Distance to the nearest chip edge, kept as the best any
+                # contributing chip offers: being at the edge of one exposure
+                # does not matter if another has the source well inside.
+                _e = np.minimum.reduce([_x, _y, _nx - 1 - _x, _ny - 1 - _y])
+                _nd += _in
+                _ed = np.where(_in, np.maximum(_ed, _e), _ed)
+                for _i in np.where(_in)[0]:
+                    _tags[_i].append(_tag)
+            subtbl['ndither']  = _nd
+            subtbl['edgedist'] = np.round(_ed, 1)
+            subtbl['srcchips'] = np.array([','.join(t)[:64] for t in _tags], dtype='U64')
+            print(f'Dither provenance: {len(_foot)} single-chip footprint(s); '
+                  f'NDITHER distribution ' +
+                  ', '.join(f'{k}:{int((_nd == k).sum())}' for k in sorted(set(_nd.tolist()))))
+        else:
+            print('Dither provenance: no single-chip exposures found; NDITHER left at 0.')
+    except Exception as e:
+        print(f'*** dither provenance skipped ({type(e).__name__}: {e}). ***')
+
+    #------------------------------------------------------------
+    #    flag 10: detection outside every contributing exposure
+    #------------------------------------------------------------
+    # NDITHER == 0 means no single-chip exposure covers the position, so the
+    # stack pixel there came from interpolation at the coadd boundary rather
+    # than from data. 804 of 128,291 detections in the 0578 R field were like
+    # this, and nothing else targets them. Given its own number rather than
+    # sharing flag_9, which the PSFEx branch uses for SPREAD_MODEL.
+    subtbl['flag_10'][subtbl['ndither'] == 0] = True
+
+    #------------------------------------------------------------
     #    flag 7: Crosstalk Contamination
     #------------------------------------------------------------
-    path_single = path_output.replace('subt', 'scaled')
     subtbl['flag_7'] = False
 
     try:
