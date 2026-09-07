@@ -61,7 +61,8 @@ from modules.transforms import Normalize
 # generate_snapshot lives one directory up, in the pipeline's util module.
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-from KMTNet_util_functions import generate_snapshot        # noqa: E402
+from KMTNet_util_functions import (generate_snapshot,        # noqa: E402
+                                   generate_single_snapshots)
 
 
 CHANNEL_COLUMN = {'new': 'inim', 'ref': 'hcim', 'sub': 'hdim'}
@@ -142,6 +143,11 @@ def parse_args():
                         "output so a score can be attributed to the flags that were set.")
     p.add_argument('--no_snapshots', action='store_true',
                    help='Score only; write no stamps.')
+    p.add_argument('--single_thresh', type=float, default=0.9,
+                   help="Also cut the candidate out of each contributing single-chip "
+                        "exposure above this score, into <outdir>/single/. Those are what "
+                        "tell a cosmic ray or a subtraction residual from something that "
+                        "was on the sky. Set above 1 to disable.")
     p.add_argument('--snap_thresh', type=float, default=0.5,
                    help='Write a snapshot for candidates scoring above this (default 0.5). '
                         'known-object matches are always written.')
@@ -257,6 +263,22 @@ def main():
     for i in range(len(keep)):
         generate_snapshot(keep[i], cutsize=args.cutsize, pixscale=args.pixscale, outdir=outdir)
     print(f'Snapshots written in {time.time() - t_snap:.1f}s')
+
+    # The few worth opening by eye also get one cutout per contributing
+    # exposure, under <outdir>/single/. Known-object matches are included
+    # whatever they scored -- that is the point of forcing them through.
+    single = (meta['prob'].values > args.single_thresh) | known[sel]
+    if single.any():
+        t_sing = time.time()
+        sdir = os.path.join(outdir, 'single')
+        n_files = 0
+        best = tbl[single]
+        for i in range(len(best)):
+            n_files += generate_single_snapshots(best[i], sdir, cutsize=args.cutsize,
+                                                 pixscale=args.pixscale)
+        print(f'Single-exposure cutouts: {n_files} file(s) for '
+              f'{int(single.sum())} candidate(s) (rbscore > {args.single_thresh}) '
+              f'in {time.time() - t_sing:.1f}s')
     print(f'Summary: The number of objects got rbscore>0.5: '
           f"{int((meta['prob'] > 0.5).sum())}")
     print(f'Total {time.time() - t_start:.1f}s')

@@ -893,3 +893,123 @@ def _append_line(path, line):
         _os.write(fd, data)
     finally:
         _os.close(fd)
+
+
+def generate_single_snapshots(row, outdir, cutsize=1.0, pixscale=0.4,
+                              qsnr_radius=5.0, _dircache={}):
+    """Cut the candidate's position out of each contributing single-chip exposure.
+
+    The stack stamp shows a candidate once; these show it once per exposure that
+    covered it. That is what separates a cosmic ray (one exposure) or a
+    subtraction residual (none of them, the source only exists in the
+    difference) from something that was really on the sky -- and for faint
+    candidates it is the judgement that matters, which is why the point is to
+    put the pixels in front of a person rather than to compute a verdict.
+
+    Which exposures those are comes from the `srcchips` / `srcdir` provenance
+    that subtraction() records; nothing is re-derived here. Rows written before
+    that existed simply have nothing to cut, and are skipped.
+
+    QSNR is a deliberately crude number: a fixed aperture against the local sky
+    scatter, no source Poisson term, no gain. Measured on a real candidate the
+    Poisson term moves it by 1-2%, because anything worth opening these stamps
+    for sits where the sky dominates -- and a more elaborate figure would only
+    look more authoritative than it is, given the pipeline assumes GAIN=1
+    throughout. The header says so.
+    """
+    import glob as _glob
+    from pathlib import Path
+    from astropy.wcs import WCS
+    from astropy.nddata import Cutout2D
+    from astropy.stats import sigma_clipped_stats
+
+    def _val(key, default=None):
+        try:
+            v = row[key]
+            return v.item() if hasattr(v, 'item') else v
+        except (KeyError, IndexError, ValueError):
+            return default
+
+    tags = str(_val('srcchips', '') or '').strip()
+    srcdir = str(_val('srcdir', '') or '').strip()
+    if not srcdir:
+        # Older catalogues carry the contributors but not the directory.
+        srcdir = os.path.dirname(str(row['inim'])).replace('/subt/', '/scaled/')
+    if not tags or not os.path.isdir(srcdir):
+        return 0
+
+    if srcdir not in _dircache:
+        _dircache[srcdir] = sorted(_glob.glob(os.path.join(srcdir, '*.scaled.fits')))
+    listing = _dircache[srcdir]
+
+    n = int(_val('NUMBER'))
+    tra, tdec = float(_val('ALPHA_J2000')), float(_val('DELTA_J2000'))
+    position = SkyCoord(ra=tra, dec=tdec, frame='icrs', unit='deg')
+    size = u.Quantity((cutsize, cutsize), u.arcmin)
+    stem = Path(str(row['hdim'])).stem
+    os.makedirs(outdir, exist_ok=True)
+
+    # Metadata carried over from the stack stamp, so a single-exposure cutout
+    # can be read on its own.
+    carried = {
+        'TRANRA':  (tra, "transient candidate center RA"),
+        'TRANDEC': (tdec, "transient candidate center DEC"),
+        'XIMAGE':  (_val('X_IMAGE'), "candidate X pixel on the stack"),
+        'YIMAGE':  (_val('Y_IMAGE'), "candidate Y pixel on the stack"),
+        'MAGAUTO': (_val('MAG_AUTO'), "candidate MAG_AUTO on the stack"),
+        'SNR':     (_val('SNR_WIN'), "candidate SNR_WIN on the stack"),
+        'SEEING':  (float(_val('FWHM_IMAGE', 0)) * pixscale, "candidate FWHM on the stack"),
+        'ELLIP':   (_val('ELLIPTICITY'), "candidate ellipticity"),
+        'ELONG':   (_val('ELONGATION'), "candidate elongation"),
+        'CLSSTAR': (_val('CLASS_STAR'), "candidate CLASS_STAR"),
+        'ASTEROID': (_val('flag_0'), "moving object matched within 5arcsec"),
+        'IMAFLAG': (_val('IMAFLAGS_ISO'), "Mask image flags"),
+        'NDITHER': (_val('ndither', -1), "exposures covering this position"),
+        'EDGEDIST': (_val('edgedist', -1.0), "px to nearest chip edge, best contributor"),
+        'SRCCHIPS': (tags[:64], "contributing exposures (serial.chip)"),
+        'SRCDIR':  (srcdir, "directory holding the contributing exposures"),
+    }
+
+    written = 0
+    for tag in [t for t in tags.split(',') if t]:
+        hits = [f for f in listing if os.path.basename(f).endswith(f'.{tag}.scaled.fits')]
+        if not hits:
+            continue
+        src = hits[0]
+        try:
+            with fits.open(src, memmap=True) as hl:
+                hdu = hl[0]
+                cut = Cutout2D(hdu.data, position=position, size=size,
+                               wcs=WCS(hdu.header), mode='partial', fill_value=0)
+                data = np.nan_to_num(cut.data, 0.0)
+                srchdr = hdu.header
+
+            ny, nx = data.shape
+            yy, xx = np.mgrid[:ny, :nx]
+            rr = np.hypot(xx - (nx - 1) / 2.0, yy - (ny - 1) / 2.0)
+            apr = rr <= qsnr_radius
+            ann = (rr > 2.4 * qsnr_radius) & (rr <= 4.0 * qsnr_radius)
+            if ann.sum() > 10 and apr.sum() > 0:
+                bkg, _, sky = sigma_clipped_stats(data[ann], sigma=3)
+                flux = float((data[apr] - bkg).sum())
+                qsnr = float(flux / (sky * np.sqrt(apr.sum()))) if sky > 0 else -1.0
+            else:
+                qsnr = -1.0
+
+            out = fits.PrimaryHDU(data=data, header=fits.Header())
+            out.header.update(cut.wcs.to_header())
+            for key, val in carried.items():
+                out.header[key] = val
+            out.header['SRCEXP']  = (tag, "exposure this cutout came from")
+            out.header['SRCFILE'] = (os.path.basename(src), "single-chip exposure file")
+            out.header['DATE-OBS'] = (srchdr.get('DATE-OBS'), "start of THIS exposure")
+            out.header['FWHM']     = (srchdr.get('FWHM'), "seeing of THIS exposure [arcsec]")
+            out.header['ASTRRMS1'] = (srchdr.get('ASTRRMS1'), "astrometric RMS of this chip")
+            out.header['QARESULT'] = (srchdr.get('QARESULT'), "astrometry QA of this chip")
+            out.header['QSNR']     = (round(qsnr, 2), "quick S/N, sky noise only, no Poisson/gain")
+            out.header['QSNRAP']   = (qsnr_radius, "aperture radius used for QSNR [px]")
+            out.writeto(os.path.join(outdir, f'{stem}.{n:06d}.{tag}.fits'), overwrite=True)
+            written += 1
+        except Exception as e:
+            print(f"  (single-exposure cutout failed for {n:06d} {tag}: {e})")
+    return written
