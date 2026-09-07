@@ -223,6 +223,34 @@ def _run_subtraction(simg, path_tmpl, path_output3, path_output4, path_cfg, know
         return simg, 'fail', f'{type(e).__name__}: {e}'
 
 
+def _run_ampcom(chunk, path_output1, path_cfg, threads):
+    """Combine amps into chips for one slice of the night's raw frames."""
+    try:
+        pipe.ampcom(path_output1, path_cfg, frames=chunk,
+                    write_header=False, cleanup=False, threads=threads)
+        return chunk, True, ''
+    except Exception as e:
+        print(f'*** ampcom failed for {len(chunk)} frame(s) starting {os.path.basename(chunk[0])}: {e} ***')
+        return chunk, False, f'{type(e).__name__}: {e}'
+
+
+def _run_astrom(chunk, path_output1, path_cfg, path_cat, field_info, threads):
+    """Solve the WCS for one slice of the night's frames.
+
+    astrom() walks whole frames (four chips each), so the split is by frame.
+    Only the parent writes ToOastrom.txt and runs the closing directory-wide
+    cleanup -- a worker doing either would clobber its siblings.
+    """
+    try:
+        pipe.astrom(path_output1, path_cfg, path_cat, radius=0.73, ithresh=10,
+                    gridcat=field_info, frames=chunk,
+                    write_info=False, cleanup=False, threads=threads)
+        return chunk, True, ''
+    except Exception as e:
+        print(f'*** astrom failed for {len(chunk)} frame(s) starting {os.path.basename(chunk[0])}: {e} ***')
+        return chunk, False, f'{type(e).__name__}: {e}'
+
+
 def _preflight():
     """Fail loudly if a file the pipeline depends on is missing.
 
@@ -374,7 +402,24 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits', known_obj=None, ncores=Non
     if ampcompro:
         _failed, _skipped = [], []
 
-        pipe.ampcom(path_output1, path_cfg)
+        _frames = sorted(os.path.basename(f) for f in glob.glob(f'{path_output1}kmt*.fits'))
+        nproc, nthread = pipe.split_budget(len(_frames), ncores,
+                                           max_procs=STAGE_MAX_PROCS.get('ampcompro'))
+        print(f'#\tampcom: {len(_frames)} frame(s), {nproc} process(es) x {nthread} thread(s)')
+        pipe._write_ampcom_header(f'{path_output1}ToOampcom.cat')
+        chunks = [_frames[i::nproc] for i in range(nproc)]
+        chunks = [c for c in chunks if c]
+        _ac = partial(_run_ampcom, path_output1=path_output1, path_cfg=path_cfg, threads=nthread)
+        if len(chunks) <= 1:
+            results = [_ac(c) for c in chunks]
+        else:
+            with multiprocessing.Pool(processes=len(chunks)) as pool:
+                results = pool.map(_ac, chunks)
+        _failed = [(c[0], why) for c, ok, why in results if not ok]
+        os.system(f'chmod 777 {path_output1}*')
+        for _d in ('badccderror', 'badseeing', 'badtracking'):
+            os.system(f'chmod 777 {path_output1}{_d}/* 2>/dev/null')
+        os.system(f'rm -f {path_output1}??????.??.ampcom.cat')
         runlog.record('ampcompro', len(glob.glob(f'{path_output1}kmt*.fits')),
                       failures=_failed, skips=_skipped)
     
@@ -385,7 +430,30 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits', known_obj=None, ncores=Non
     if astrompro:
         _failed, _skipped = [], []
 
-        pipe.astrom(path_output1, path_cfg, path_cat, radius=0.73, ithresh=10, gridcat=field_info)
+        _frames = sorted(os.path.basename(f) for f in glob.glob(f'{path_output1}kmt*.fits'))
+        nproc, nthread = pipe.split_budget(len(_frames), ncores,
+                                           max_procs=STAGE_MAX_PROCS.get('astrompro'))
+        print(f'#\tastrom: {len(_frames)} frame(s), {nproc} process(es) x {nthread} thread(s)')
+        if _frames:
+            # Build the night's table once, here, before any worker starts.
+            pipe.astrom(path_output1, path_cfg, path_cat, radius=0.73, ithresh=10,
+                        gridcat=field_info, write_info=True, cleanup=False,
+                        collect_only=True)
+        # Round-robin rather than contiguous blocks: frames of one field sit
+        # together in the listing and share a Gaia-XP catalogue, so dealing them
+        # out spreads the reference-catalogue reads across workers.
+        chunks = [_frames[i::nproc] for i in range(nproc)]
+        chunks = [c for c in chunks if c]
+        _ast = partial(_run_astrom, path_output1=path_output1, path_cfg=path_cfg,
+                       path_cat=path_cat, field_info=field_info, threads=nthread)
+        if len(chunks) <= 1:
+            results = [_ast(c) for c in chunks]
+        else:
+            with multiprocessing.Pool(processes=len(chunks)) as pool:
+                results = pool.map(_ast, chunks)
+        _failed = [(c[0], why) for c, ok, why in results if not ok]
+        os.system(f'chmod 777 {path_output1}*')
+        os.system(f'rm -f {path_output1}??????.??.astrom.cat')
         runlog.record('astrompro', len(Table.read(f'{path_output1}ToOastrom.txt', format ='ascii')),
                       failures=_failed, skips=_skipped)
 
@@ -478,11 +546,15 @@ def ToO_pipeline(date, field_info='kmtnet_grid.fits', known_obj=None, ncores=Non
         pattern = r"(?P<field>.*?_\d{4})\.(?P<radec>\d{3}-\d{2})\.(?P<band>[BVRI])\.(?P<date>\d{8})\.(?P<site>\w+)\.(?P<serial>\d{6})\.(?P<chip>\w+)\.(?P<type>scaled|mask)\.fits"
         # stacking() walks (observatory, field, band) internally, so the budget
         # goes to SWarp's own threads here rather than to worker processes.
-        # MEM_MAX stayed at the shipped 256 MB, which on a 22000x22000 coadd
-        # forces SWarp into its VMEM swap files and leaves the threads waiting
-        # on disk; giving it a real share of RAM is the point of the budget.
+        #
+        # MEM_MAX stays at the shipped 256 MB. Raising it to 4096 looked like an
+        # obvious win -- a 22000x22000 coadd on 256 MB should be swapping -- but
+        # measured on one real stack it bought 2% (386.3 s -> 378.8 s) for 13x
+        # the resident memory (0.3 GB -> 4.0 GB peak), and the output was
+        # pixel-identical. On a machine shared with other users that trade is
+        # not worth taking.
         _sw_threads = max(1, ncores)
-        _memmax     = 4096
+        _memmax     = 256
         print(f'#\tstacking: SWarp with {_sw_threads} thread(s), MEM_MAX {_memmax} MB')
         total   = pipe.stacking(pattern, path_output2, path_output3, path_cfg, path_tmpl,
                                 combinetype='MEDIAN', start=start, gridcat=field_info,

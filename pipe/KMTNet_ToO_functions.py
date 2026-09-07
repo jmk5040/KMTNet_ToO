@@ -23,7 +23,13 @@ from KMTNet_util_functions import (
     calculate_crosstalk_positions, build_sex_command
 )
 #%% ToOAmplifierCombine.py
-def ampcom(path_data, path_cfg):
+def _write_ampcom_header(path):
+    """Start ToOampcom.cat fresh with its column header."""
+    with open(path, 'w') as f:
+        f.write('#name skykk skymm skytt skynn fwhmkk fwhmmm fwhmtt fwhmnn\n')
+
+
+def ampcom(path_data, path_cfg, frames=None, write_header=True, cleanup=True, threads=1):
     """
     Amplifier combination and quality control for KMTNet images.
     
@@ -104,7 +110,14 @@ def ampcom(path_data, path_cfg):
     if not path_data.endswith('/'):
         path_data   = path_data + '/'
 
+    set_thread_limits(threads)
+
+    # `frames` hands one worker a slice of the night; without it every worker
+    # would glob the whole directory and redo all of it.
     allframes = sorted(str(p) for p in Path(path_data).glob('kmt*fits'))
+    if frames is not None:
+        wanted = {os.path.basename(str(f)) for f in frames}
+        allframes = [f for f in allframes if os.path.basename(f) in wanted]
 
     os.makedirs(os.path.join(path_data, 'badccderror'), exist_ok=True)
     os.makedirs(os.path.join(path_data, 'badseeing'), exist_ok=True)
@@ -167,8 +180,10 @@ def ampcom(path_data, path_cfg):
     decdd = decd.degree
 
     # Comebine 32 amps to 4 chips
-    with open(f'{path_data}ToOampcom.cat', 'w') as f:
-        f.write('#name skykk skymm skytt skynn fwhmkk fwhmmm fwhmtt fwhmnn\n')
+    # 'w' truncates, so only the parent may write the header line -- a worker
+    # doing it would wipe whatever its siblings had already appended.
+    if write_header:
+        _write_ampcom_header(f'{path_data}ToOampcom.cat')
 
     for i in range(len(info)):
 
@@ -254,7 +269,7 @@ def ampcom(path_data, path_cfg):
             conv        = os.path.join(path_cfg, 'kmtnet.conv')
             nnw         = os.path.join(path_cfg, 'kmtnet.nnw')
     
-            os.system(f'source-extractor {path_data}{serial}.{chip}.fits -c {cfg} -CATALOG_TYPE ASCII_HEAD -CATALOG_NAME {catname} -PARAMETERS_NAME {param} -FILTER_NAME {conv} -STARNNW_NAME {nnw} -DETECT_THRESH 50 -ANALYSIS_THRESH 50')
+            os.system(f'source-extractor {path_data}{serial}.{chip}.fits -c {cfg} -CATALOG_TYPE ASCII_HEAD -CATALOG_NAME {catname} -PARAMETERS_NAME {param} -FILTER_NAME {conv} -STARNNW_NAME {nnw} -DETECT_THRESH 50 -ANALYSIS_THRESH 50 -NTHREADS {threads}')
                       
             cat = Table.read(f'{path_data}{serial}.{chip}.ampcom.cat', format ='ascii')
             magauto = np.array(cat['MAG_AUTO'])
@@ -314,20 +329,27 @@ def ampcom(path_data, path_cfg):
                 h0.set('fwhm1avg', np.mean(fwhmarr))
                 h0.set('elonavg', np.mean(elonarr))
     
-        with open(f'{path_data}ToOampcom.cat', 'a') as f:
-            f.write(f'{name[i]} {skykk:7.1f} {skymm:7.1f} {skytt:7.1f} {skynn:7.1f} {fwhmarr[0]:5.1f} {fwhmarr[1]:5.1f} {fwhmarr[2]:5.1f} {fwhmarr[3]:5.1f}\n')
+        # One short O_APPEND write per frame, so parallel workers interleave
+        # cleanly instead of through Python's buffering.
+        _append_line(f'{path_data}ToOampcom.cat',
+                     f'{name[i]} {skykk:7.1f} {skymm:7.1f} {skytt:7.1f} {skynn:7.1f} '
+                     f'{fwhmarr[0]:5.1f} {fwhmarr[1]:5.1f} {fwhmarr[2]:5.1f} {fwhmarr[3]:5.1f}\n')
     
-    os.system(f'chmod 777 {path_data}*')
-    os.system(f'chmod 777 {path_data}badccderror/*')
-    os.system(f'chmod 777 {path_data}badseeing/*')
-    os.system(f'chmod 777 {path_data}badtracking/*')
-    os.system(f'rm {path_data}??????.??.ampcom.cat')
+    # Directory-wide, so a worker running these would touch its siblings' files
+    # and delete catalogues still in use.
+    if cleanup:
+        os.system(f'chmod 777 {path_data}*')
+        os.system(f'chmod 777 {path_data}badccderror/*')
+        os.system(f'chmod 777 {path_data}badseeing/*')
+        os.system(f'chmod 777 {path_data}badtracking/*')
+        os.system(f'rm -f {path_data}??????.??.ampcom.cat')
     
     return 0
 #%% ToOAstrometry.py
 def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet_grid.fits',
            astrom_rms_max=1e-4, neighbour_fallback=True, neighbour_max_age_days=3.0,
-           gaiaxp_download=True, frames=None, write_info=True, cleanup=True, collect_only=False, threads=1):
+           gaiaxp_download=True, frames=None, write_info=True, cleanup=True, collect_only=False, threads=1,
+           sexparam='kmtnet_novignet.param'):
     """
     Astrometric calibration of KMTNet chip images using SCAMP.
     
@@ -573,7 +595,14 @@ def astrom(path_data, path_cfg, path_cat, radius=1.0, ithresh=5, gridcat='kmtnet
                 hd.flush()  # Write changes to the file
             
             catname     = f'{path_data}{serial}.{chip}.astrom.cat'
-            param       = os.path.join(path_cfg, 'kmtnet.param')
+            # kmtnet.param carries VIGNET(50,50) for the PSFEx branch of
+            # subtraction(); SCAMP never reads it. Measured on 8 chips, dropping
+            # it leaves the astrometric solution alone -- worst ASTRRMS
+            # difference 1e-9 mas against solutions of ~34 mas -- while the
+            # per-chip catalogue falls from 527 MB to 8.1 MB. That is 81 GB of
+            # writes per 156-chip night, which matters most once the frames are
+            # solved side by side.
+            param       = os.path.join(path_cfg, sexparam)
             cfg         = os.path.join(path_cfg, 'kmtnet.sex')
             conv        = os.path.join(path_cfg, 'kmtnet.conv')
             nnw         = os.path.join(path_cfg, 'kmtnet.nnw')
@@ -2650,8 +2679,9 @@ def stacking(filename_convention, path_input, path_output, path_cfg, path_ref, c
                 # stacks would overwrite each other. RESAMPLE_DIR/VMEM_DIR are '.'
                 # in the config, which put hundreds of MB into whatever directory
                 # the pipeline happened to be launched from.
-                _tag = os.path.basename(stack).replace('.fits', '')
-                _scratch = os.path.join(path_output, f'.swarp_{_tag}')
+                # `stack` is not named until further down, so the tag comes from
+                # the loop variables that already identify this coadd uniquely.
+                _scratch = os.path.join(path_output, f'.swarp_{observ}_{field}.{radec}_{band}')
                 os.makedirs(_scratch, exist_ok=True)
                 _dithlist = os.path.join(_scratch, 'diths.list')
                 f = open(_dithlist, 'w')
